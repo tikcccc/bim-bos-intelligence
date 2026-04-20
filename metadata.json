@@ -1,0 +1,11 @@
+{
+  "name": "BIM BOS Intelligence",
+  "description": "Integrated sales intelligence platform for isBIM. AI-powered email intake, tender analysis, CRM partnership monitoring, and automated proposal generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "AI Document Analysis (Tenders/RFPs)",
+    "Lightweight CRM & Account Health Scoring",
+    "Automated Quote & Proposal Generation",
+    "Smart Email Task Prioritization"
+  ]
+}

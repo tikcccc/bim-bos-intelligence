@@ -1,0 +1,116 @@
+{
+  "entities": {
+    "EmailIntake": {
+      "title": "Email Intake",
+      "description": "Raw email data and its classification status",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "subject": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "body": { "type": "string" },
+        "receivedAt": { "type": "string", "format": "date-time" },
+        "aiClassification": { "type": "string", "enum": ["OPPORTUNITY", "REQUEST", "SUBMITTED", "AWARDED", "OTHER"] },
+        "aiConfidence": { "type": "number" },
+        "status": { "type": "string", "enum": ["PENDING", "CONFIRMED", "REJECTED"] },
+        "extractedData": { "type": "object" }
+      },
+      "required": ["uid", "subject", "from", "receivedAt", "status"]
+    },
+    "TemplateRecord": {
+      "title": "Template Record",
+      "description": "Structured business record converted from an email",
+      "type": "object",
+      "properties": {
+        "referenceNumber": { "type": "string" },
+        "templateType": { "type": "string", "enum": ["OPPORTUNITY", "REQUEST", "SUBMITTED", "AWARDED", "OTHER"] },
+        "emailId": { "type": "string" },
+        "data": { "type": "object" },
+        "status": { "type": "string" },
+        "assignedTo": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["referenceNumber", "templateType", "emailId", "data", "status", "createdAt"]
+    },
+    "Meeting": {
+      "title": "Meeting",
+      "description": "Captured meeting details, decisions and actions",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "decisions": { "type": "array" },
+        "actions": { "type": "array" },
+        "followUpEmails": { "type": "array" },
+        "sentimentSummary": { "type": "string" }
+      },
+      "required": ["uid", "title", "date"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A trackable action item assigned to a user",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["todo", "in_progress", "done"] },
+        "priority": { "type": "integer" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "assignee": { "type": "string" },
+        "meetingId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "title", "status", "createdAt"]
+    },
+    "Account": {
+      "title": "Account",
+      "description": "VIP Strategic account and contact information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "industry": { "type": "string" },
+        "tier": { "type": "string", "enum": ["strategic", "priority", "standard"] },
+        "primary_contact": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "email": { "type": "string" },
+            "mobile": { "type": "string" },
+            "position": { "type": "string" }
+          }
+        },
+        "owner_id": { "type": "string" },
+        "owner_email": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "tier", "owner_id", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/emails": {
+      "schema": "EmailIntake",
+      "description": "Collection of incoming emails and their AI analysis"
+    },
+    "/templates": {
+      "schema": "TemplateRecord",
+      "description": "Collection of confirmed business templates"
+    },
+    "/meetings": {
+      "schema": "Meeting",
+      "description": "Collection of meeting records and intelligence"
+    },
+    "/tasks": {
+      "schema": "Task",
+      "description": "Collection of operational tasks"
+    },
+    "/accounts": {
+      "schema": "Account",
+      "description": "Collection of strategic VIP accounts"
+    }
+  }
+}

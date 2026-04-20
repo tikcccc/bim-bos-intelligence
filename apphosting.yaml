@@ -1,0 +1,15 @@
+scripts:
+  buildCommand: npm run build
+  runCommand: npm run start
+env:
+  - variable: GEMINI_API_KEY
+    secret: GEMINI_API_KEY
+    availability:
+      - RUNTIME
+outputFiles:
+  serverApp:
+    include:
+      - dist
+      - server.ts
+      - server
+      - firebase-applet-config.json
