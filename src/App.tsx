@@ -2347,12 +2347,14 @@ INSTRUCTIONS:
                 active={activeTab === 'SKILLS'} 
                 onClick={() => setActiveTab('SKILLS')} 
               />
-              <NavItem 
-                icon={<Server className="w-5 h-5" />} 
-                label="Connection" 
-                active={activeTab === 'CONNECTIONS'} 
-                onClick={() => setActiveTab('CONNECTIONS')} 
-              />
+              {isAdmin && (
+                <NavItem 
+                  icon={<Server className="w-5 h-5" />} 
+                  label="Connection" 
+                  active={activeTab === 'CONNECTIONS'} 
+                  onClick={() => setActiveTab('CONNECTIONS')} 
+                />
+              )}
             </nav>
           </div>
 
