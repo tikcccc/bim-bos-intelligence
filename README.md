@@ -58,3 +58,7 @@ Required backend env:
 `CORS_ORIGIN` accepts a comma-separated allowlist, for example:
 
 `https://your-project.web.app,https://your-project.firebaseapp.com`
+
+
+npm run build
+npx firebase-tools deploy --only hosting --project jarvis-bom-intellgence

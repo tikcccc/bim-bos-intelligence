@@ -1,10 +1,9 @@
 {
-  "projectId": "gen-lang-client-0588620090",
-  "appId": "1:702422647278:web:942d4e9eeae7e62e8aceff",
-  "apiKey": "AIzaSyA5AEIOq-N2WeCcLb3-nNPBohonGdx1ZSU",
-  "authDomain": "gen-lang-client-0588620090.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-ffa5fe6d-26a5-4082-abc3-c1f479cf1bc4",
-  "storageBucket": "gen-lang-client-0588620090.firebasestorage.app",
-  "messagingSenderId": "702422647278",
-  "measurementId": ""
+  "apiKey": "AIzaSyDapk-SmJvFV6IE7FwBs4hTBl9O48NUMBY",
+  "authDomain": "jarvis-bom-intellgence.firebaseapp.com",
+  "projectId": "jarvis-bom-intellgence",
+  "storageBucket": "jarvis-bom-intellgence.firebasestorage.app",
+  "messagingSenderId": "961551231808",
+  "appId": "1:961551231808:web:193ff410b74cc076ee68a5",
+  "measurementId": "G-W5LJYY4ECM"
 }

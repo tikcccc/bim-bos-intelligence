@@ -1,13 +1,7 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
 import type { BusinessContextCache, ConversationMemory, IntentResponse, ProactiveAlert, UserContext } from "../../src/types/ai";
-
-const getAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured for the App Hosting runtime.");
-  }
-  return new GoogleGenAI({ apiKey });
-};
+import type { AIConfig } from "./aiProvider";
+import { generateJson } from "./aiProvider";
 
 const BOS_TOOLS = [
   {
@@ -60,9 +54,9 @@ const BOS_TOOLS = [
 export async function routeIntent(
   message: string,
   userContext: UserContext,
-  memory: ConversationMemory
+  memory: ConversationMemory,
+  config?: AIConfig
 ): Promise<IntentResponse & { functionCalls?: any[] }> {
-  const ai = getAI();
   const prompt = `
     Act as the Central AI Chatbot for BIM BOS (Business Operating System).
     Role: ${userContext.role}
@@ -80,41 +74,27 @@ export async function routeIntent(
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [{ role: "user", parts: [{ text: message }] }],
-      config: {
-        systemInstruction: prompt,
-        tools: BOS_TOOLS,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            confidence: { type: Type.NUMBER },
-            targetModule: { type: Type.STRING },
-            explanation: { type: Type.STRING }
-          },
-          required: ["explanation"]
-        }
+    const resData = await generateJson<any>({
+      prompt: `USER REQUEST: "${message}"`,
+      config,
+      systemInstruction: prompt,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          confidence: { type: Type.NUMBER },
+          targetModule: { type: Type.STRING },
+          explanation: { type: Type.STRING }
+        },
+        required: ["explanation"]
       }
     });
-
-    let resData: any = { explanation: "I've processed your request." };
-    try {
-      if (response.text) {
-        resData = JSON.parse(response.text);
-      }
-    } catch (error) {
-      console.warn("AI returned invalid JSON text:", response.text, error);
-    }
 
     return {
       confidence: resData.confidence || 0.9,
       targetModule: resData.targetModule || userContext.activeModule,
       explanation: resData.explanation,
       intent: "chat",
-      entities: {},
-      functionCalls: response.functionCalls
+      entities: {}
     } as IntentResponse & { functionCalls?: any[] };
   } catch (error) {
     console.error("Orchestration Error:", error);
@@ -130,9 +110,9 @@ export async function routeIntent(
 
 export async function generateProactiveAlerts(
   userContext: UserContext,
-  businessCache: BusinessContextCache
+  businessCache: BusinessContextCache,
+  config?: AIConfig
 ): Promise<ProactiveAlert[]> {
-  const ai = getAI();
   const prompt = `
     Act as a proactive Business Advisor for isBIM BOS.
     Review the user's current business state and generate exactly 3 prioritized alerts.
@@ -154,30 +134,25 @@ export async function generateProactiveAlerts(
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING },
-              title: { type: Type.STRING },
-              body: { type: Type.STRING },
-              actionUrl: { type: Type.STRING },
-              priority: { type: Type.INTEGER },
-              timestamp: { type: Type.STRING }
-            },
-            required: ["title", "body", "priority"]
-          }
+    return await generateJson<ProactiveAlert[]>({
+      prompt,
+      config,
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            id: { type: Type.STRING },
+            title: { type: Type.STRING },
+            body: { type: Type.STRING },
+            actionUrl: { type: Type.STRING },
+            priority: { type: Type.INTEGER },
+            timestamp: { type: Type.STRING }
+          },
+          required: ["title", "body", "priority"]
         }
       }
     });
-
-    return JSON.parse(response.text || "[]");
   } catch (error) {
     console.error("Alert Generation Error:", error);
     return [];

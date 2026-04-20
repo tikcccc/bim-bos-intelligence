@@ -1,9 +1,5 @@
-import { GoogleGenAI, Type } from "@google/genai";
-
-export interface GeminiConfig {
-  model?: string;
-  userRole?: string;
-}
+import { Type } from "@google/genai";
+import { AIConfig, generateJson, generateText } from "./aiProvider";
 
 const getRBACContext = (role?: string) => {
   if (role === "boss") {
@@ -12,24 +8,11 @@ const getRBACContext = (role?: string) => {
   return "CONTEXT: You are responding to a SALES representative. Provide focused, action-oriented guidance for their assigned accounts. Maintain data isolation and avoid company-wide high-level financial disclosures.";
 };
 
-const getAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured for the App Hosting runtime.");
-  }
-  return new GoogleGenAI({ apiKey });
-};
-
-const getModel = (config?: GeminiConfig) => config?.model || "gemini-3-flash-preview";
-
 export const classifyEmail = async (
   email: { subject: string; body: string; from: string; attachments?: any[] },
   customPrompt?: string,
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const attachmentContext =
     email.attachments && email.attachments.length > 0
       ? `\nATTACHMENTS:\n${email.attachments.map(a => `- ${a.filename} (${a.contentType})${a.content ? `\n  Content: ${a.content.substring(0, 1000)}` : ""}`).join("\n")}`
@@ -75,46 +58,38 @@ export const classifyEmail = async (
       .replace("{{attachments}}", attachmentContext);
   }
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          classification: { type: Type.STRING, enum: ["MEETING", "PROJECT", "MARKETING", "FINANCE", "OPPORTUNITY", "REQUEST", "SUBMITTED", "AWARDED", "OTHER"] },
-          confidence: { type: Type.NUMBER },
-          summary: { type: Type.STRING },
-          extractedData: {
-            type: Type.OBJECT,
-            properties: {
-              projectName: { type: Type.STRING },
-              clientName: { type: Type.STRING, description: "Personal name of the client/sender" },
-              clientOrganization: { type: Type.STRING, description: "The company or organization the client represents" },
-              clientEmail: { type: Type.STRING, description: "External client email address ONLY. Ignore isBIM and Jarvis domains." },
-              deadline: { type: Type.STRING },
-              amount: { type: Type.STRING },
-              currency: { type: Type.STRING },
-              estimateValue: { type: Type.NUMBER, description: "Numeric value of the estimate or amount" },
-              location: { type: Type.STRING },
-              technicalRequirements: { type: Type.ARRAY, items: { type: Type.STRING } }
-            }
-          },
-          reasoning: { type: Type.STRING }
+  return generateJson<any>({
+    prompt,
+    config,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        classification: { type: Type.STRING, enum: ["MEETING", "PROJECT", "MARKETING", "FINANCE", "OPPORTUNITY", "REQUEST", "SUBMITTED", "AWARDED", "OTHER"] },
+        confidence: { type: Type.NUMBER },
+        summary: { type: Type.STRING },
+        extractedData: {
+          type: Type.OBJECT,
+          properties: {
+            projectName: { type: Type.STRING },
+            clientName: { type: Type.STRING, description: "Personal name of the client/sender" },
+            clientOrganization: { type: Type.STRING, description: "The company or organization the client represents" },
+            clientEmail: { type: Type.STRING, description: "External client email address ONLY. Ignore isBIM and Jarvis domains." },
+            deadline: { type: Type.STRING },
+            amount: { type: Type.STRING },
+            currency: { type: Type.STRING },
+            estimateValue: { type: Type.NUMBER, description: "Numeric value of the estimate or amount" },
+            location: { type: Type.STRING },
+            technicalRequirements: { type: Type.ARRAY, items: { type: Type.STRING } }
+          }
         },
-        required: ["classification", "confidence", "summary", "extractedData"]
-      }
+        reasoning: { type: Type.STRING }
+      },
+      required: ["classification", "confidence", "summary", "extractedData"]
     }
   });
-
-  return JSON.parse(response.text || "{}");
 };
 
-export const analyzeTender = async (tenderText: string, customPrompt?: string, config?: GeminiConfig) => {
-  const ai = getAI();
-  const model = getModel(config);
-
+export const analyzeTender = async (tenderText: string, customPrompt?: string, config?: AIConfig) => {
   const defaultPrompt = `
     You are an expert Bid Intelligence Specialist. Analyze the following tender/RFP document text.
     ${getRBACContext(config?.userRole)}
@@ -137,84 +112,76 @@ export const analyzeTender = async (tenderText: string, customPrompt?: string, c
     prompt = prompt.replace("{{text}}", tenderText.substring(0, 20000));
   }
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          issuing_org: { type: Type.STRING },
-          deadline: { type: Type.STRING },
-          summary: { type: Type.STRING },
-          value_range: {
+  return generateJson<any>({
+    prompt,
+    config,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        title: { type: Type.STRING },
+        issuing_org: { type: Type.STRING },
+        deadline: { type: Type.STRING },
+        summary: { type: Type.STRING },
+        value_range: {
+          type: Type.OBJECT,
+          properties: {
+            min: { type: Type.NUMBER },
+            max: { type: Type.NUMBER },
+            currency: { type: Type.STRING }
+          }
+        },
+        requirements: {
+          type: Type.ARRAY,
+          items: {
             type: Type.OBJECT,
             properties: {
-              min: { type: Type.NUMBER },
-              max: { type: Type.NUMBER },
-              currency: { type: Type.STRING }
+              text: { type: Type.STRING },
+              category: { type: Type.STRING, enum: ["technical", "commercial", "legal"] },
+              mandatory: { type: Type.BOOLEAN }
             }
-          },
-          requirements: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                text: { type: Type.STRING },
-                category: { type: Type.STRING, enum: ["technical", "commercial", "legal"] },
-                mandatory: { type: Type.BOOLEAN }
-              }
-            }
-          },
-          evaluation_criteria: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                criterion: { type: Type.STRING },
-                weight_percent: { type: Type.NUMBER }
-              }
-            }
-          },
-          contacts: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                role: { type: Type.STRING },
-                email: { type: Type.STRING }
-              }
-            }
-          },
-          risk_assessment: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                type: { type: Type.STRING },
-                description: { type: Type.STRING },
-                severity: { type: Type.STRING, enum: ["low", "medium", "high"] }
-              }
-            }
-          },
-          win_themes: { type: Type.ARRAY, items: { type: Type.STRING } },
-          win_probability_hint: { type: Type.NUMBER, description: "Estimated win probability based on requirements match (0-100)" }
+          }
         },
-        required: ["title", "issuing_org", "deadline", "requirements", "evaluation_criteria"]
-      }
+        evaluation_criteria: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              criterion: { type: Type.STRING },
+              weight_percent: { type: Type.NUMBER }
+            }
+          }
+        },
+        contacts: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              role: { type: Type.STRING },
+              email: { type: Type.STRING }
+            }
+          }
+        },
+        risk_assessment: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              type: { type: Type.STRING },
+              description: { type: Type.STRING },
+              severity: { type: Type.STRING, enum: ["low", "medium", "high"] }
+            }
+          }
+        },
+        win_themes: { type: Type.ARRAY, items: { type: Type.STRING } },
+        win_probability_hint: { type: Type.NUMBER, description: "Estimated win probability based on requirements match (0-100)" }
+      },
+      required: ["title", "issuing_org", "deadline", "requirements", "evaluation_criteria"]
     }
   });
-
-  return JSON.parse(response.text || "{}");
 };
 
-export const createBidDraft = async (tenderAnalysis: any, customPrompt?: string, config?: GeminiConfig) => {
-  const ai = getAI();
-  const model = getModel(config);
-
+export const createBidDraft = async (tenderAnalysis: any, customPrompt?: string, config?: AIConfig) => {
   const defaultPrompt = `
     Based on the following tender analysis, create a professional bid draft for isBIM (a construction and BIM services company).
     
@@ -235,46 +202,26 @@ export const createBidDraft = async (tenderAnalysis: any, customPrompt?: string,
     prompt = prompt.replace("{{analysis}}", JSON.stringify(tenderAnalysis));
   }
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
-
-  return response.text;
+  return generateText({ prompt, config });
 };
 
-export const ocrDocument = async (base64Data: string, mimeType: string, config?: GeminiConfig) => {
-  const ai = getAI();
-  const model = getModel(config);
-
+export const ocrDocument = async (base64Data: string, mimeType: string, config?: AIConfig) => {
   const prompt = "Extract all text from this document. Maintain the original structure and layout as much as possible. Return ONLY the extracted text.";
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{
-      role: "user",
-      parts: [
-        { text: prompt },
-        {
-          inlineData: {
-            mimeType,
-            data: base64Data
-          }
-        }
-      ]
-    }]
+  return generateText({
+    prompt,
+    config,
+    inlineData: {
+      mimeType,
+      data: base64Data
+    }
   });
-
-  return response.text;
 };
 
 export const analyzeMeetingIntelligence = async (
   notes: string,
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Act as a Meeting Intelligence Specialist. Analyze the following meeting notes/transcript and extract structured insights.
     
@@ -291,70 +238,62 @@ export const analyzeMeetingIntelligence = async (
     7. Return strict JSON matching the schema below.
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          date: { type: Type.STRING },
-          participants: { type: Type.ARRAY, items: { type: Type.STRING } },
-          decisions: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                text: { type: Type.STRING },
-                context: { type: Type.STRING }
-              }
+  return generateJson<any>({
+    prompt,
+    config,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        title: { type: Type.STRING },
+        date: { type: Type.STRING },
+        participants: { type: Type.ARRAY, items: { type: Type.STRING } },
+        decisions: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              text: { type: Type.STRING },
+              context: { type: Type.STRING }
             }
-          },
-          actions: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                description: { type: Type.STRING },
-                ownerEmail: { type: Type.STRING },
-                dueDate: { type: Type.STRING },
-                priority: { type: Type.INTEGER, minimum: 1, maximum: 5 },
-                relatedEmailThreadId: { type: Type.STRING }
-              }
-            }
-          },
-          followUpEmails: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                recipient: { type: Type.STRING },
-                subjectHint: { type: Type.STRING },
-                keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } }
-              }
-            }
-          },
-          openQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          sentimentSummary: { type: Type.STRING }
+          }
         },
-        required: ["title", "decisions", "actions", "sentimentSummary"]
-      }
+        actions: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              description: { type: Type.STRING },
+              ownerEmail: { type: Type.STRING },
+              dueDate: { type: Type.STRING },
+              priority: { type: Type.INTEGER, minimum: 1, maximum: 5 },
+              relatedEmailThreadId: { type: Type.STRING }
+            }
+          }
+        },
+        followUpEmails: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              recipient: { type: Type.STRING },
+              subjectHint: { type: Type.STRING },
+              keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } }
+            }
+          }
+        },
+        openQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+        sentimentSummary: { type: Type.STRING }
+      },
+      required: ["title", "decisions", "actions", "sentimentSummary"]
     }
   });
-
-  return JSON.parse(response.text || "{}");
 };
 
 export const generateReplyDraft = async (
   email: { subject: string; body: string; from: string },
   userPrompt: string,
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     You are an expert business communicator for isBIM. Write a draft reply to the following email.
     
@@ -373,22 +312,14 @@ export const generateReplyDraft = async (
     4. Provide the draft as plain text without placeholders if possible.
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
-
-  return response.text;
+  return generateText({ prompt, config });
 };
 
 export const prioritizeTask = async (
   task: any,
   context: { clientTier: string; businessContext: any },
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Act as a Workflow Automation Engineer for BIM BOS. 
     Score priority 1-5 for this task considering:
@@ -412,14 +343,8 @@ export const prioritizeTask = async (
     }
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: { responseMimeType: "application/json" }
-  });
-
   try {
-    return JSON.parse(response.text || "{}");
+    return await generateJson<any>({ prompt, config });
   } catch (error) {
     console.error("Failed to parse task priority:", error);
     return { priority_score: 3, rationale: "Standard priority assigned." };
@@ -428,11 +353,8 @@ export const prioritizeTask = async (
 
 export const generateTaskAlerts = async (
   tasks: any[],
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Review user's tasks and generate proactive alerts.
     Tasks: ${JSON.stringify(tasks.slice(0, 20))}
@@ -445,14 +367,8 @@ export const generateTaskAlerts = async (
     [{ "task_id": string, "alert_type": "upcoming|overdue|blocked", "message": string, "suggested_action": string }]
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: { responseMimeType: "application/json" }
-  });
-
   try {
-    return JSON.parse(response.text || "[]");
+    return await generateJson<any[]>({ prompt, config });
   } catch (error) {
     console.error("Failed to parse task alerts:", error);
     return [];
@@ -463,11 +379,8 @@ export const analyzeAccountHealth = async (
   account: any,
   interactions: { emails: any[]; meetings: any[] },
   opportunities: any[],
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Act as a Senior Relationship Manager and Sales Analyst. 
     ${getRBACContext(config?.userRole)}
@@ -493,27 +406,22 @@ export const analyzeAccountHealth = async (
     Return a strict JSON object matching AccountAIInsights schema.
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          health_score: { type: Type.NUMBER },
-          health_trend: { type: Type.STRING, enum: ["improving", "stable", "declining"] },
-          recommended_actions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          churn_risk: { type: Type.STRING, enum: ["low", "medium", "high"] },
-          upsell_hints: { type: Type.ARRAY, items: { type: Type.STRING } },
-          next_best_action: { type: Type.STRING }
-        },
-        required: ["health_score", "health_trend", "recommended_actions", "churn_risk", "next_best_action"]
-      }
+  return generateJson<any>({
+    prompt,
+    config,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        health_score: { type: Type.NUMBER },
+        health_trend: { type: Type.STRING, enum: ["improving", "stable", "declining"] },
+        recommended_actions: { type: Type.ARRAY, items: { type: Type.STRING } },
+        churn_risk: { type: Type.STRING, enum: ["low", "medium", "high"] },
+        upsell_hints: { type: Type.ARRAY, items: { type: Type.STRING } },
+        next_best_action: { type: Type.STRING }
+      },
+      required: ["health_score", "health_trend", "recommended_actions", "churn_risk", "next_best_action"]
     }
   });
-
-  return JSON.parse(response.text || "{}");
 };
 
 export const generateStructuredProposal = async (
@@ -523,11 +431,8 @@ export const generateStructuredProposal = async (
     account?: any;
     pastWins?: any[];
   },
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Act as a Senior Proposal Engineer for isBIM. 
     ${getRBACContext(config?.userRole)}
@@ -549,53 +454,45 @@ export const generateStructuredProposal = async (
     Return a strict JSON object matching DocumentSection[] and pricing suggestions.
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          sections: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                content: { type: Type.STRING },
-                confidence: { type: Type.NUMBER }
-              }
+  return generateJson<any>({
+    prompt,
+    config,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        sections: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              content: { type: Type.STRING },
+              confidence: { type: Type.NUMBER }
             }
-          },
-          pricing_suggestions: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                description: { type: Type.STRING },
-                suggested_amount: { type: Type.NUMBER }
-              }
-            }
-          },
-          risk_notes: { type: Type.ARRAY, items: { type: Type.STRING } }
+          }
         },
-        required: ["sections", "pricing_suggestions"]
-      }
+        pricing_suggestions: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              description: { type: Type.STRING },
+              suggested_amount: { type: Type.NUMBER }
+            }
+          }
+        },
+        risk_notes: { type: Type.ARRAY, items: { type: Type.STRING } }
+      },
+      required: ["sections", "pricing_suggestions"]
     }
   });
-
-  return JSON.parse(response.text || "{}");
 };
 
 export const improveProposalSection = async (
   sectionContent: string,
   instruction: string,
-  config?: GeminiConfig
+  config?: AIConfig
 ) => {
-  const ai = getAI();
-  const model = getModel(config);
-
   const prompt = `
     Refine this proposal section.
     
@@ -611,10 +508,5 @@ export const improveProposalSection = async (
     3. Return only the improved content.
   `;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
-
-  return response.text;
+  return generateText({ prompt, config });
 };

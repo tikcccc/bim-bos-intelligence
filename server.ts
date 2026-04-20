@@ -12,6 +12,7 @@ import nodemailer from 'nodemailer';
 import { createRequire } from 'module';
 import { analyzeAccountHealth, analyzeMeetingIntelligence, analyzeTender, classifyEmail, createBidDraft, generateReplyDraft, generateStructuredProposal, generateTaskAlerts, improveProposalSection, ocrDocument, prioritizeTask } from './server/ai/geminiService';
 import { generateProactiveAlerts, routeIntent } from './server/ai/aiOrchestrator';
+import { getRuntimeHealth } from './server/ai/aiProvider';
 const require = createRequire(import.meta.url);
 
 dotenv.config();
@@ -71,7 +72,7 @@ const handleAIRequest = async (res: express.Response, runner: () => Promise<unkn
     res.json({ result });
   } catch (error: any) {
     console.error('AI request failed:', error);
-    res.status(500).json({
+    res.status(error?.status || 500).json({
       error: 'AI request failed',
       details: error?.message || 'Unknown AI error'
     });
@@ -123,24 +124,25 @@ app.post('/api/ai/improve-proposal-section', async (req, res) => {
 });
 
 app.post('/api/ai/route-intent', async (req, res) => {
-  await handleAIRequest(res, () => routeIntent(req.body.message, req.body.userContext, req.body.memory));
+  await handleAIRequest(res, () => routeIntent(req.body.message, req.body.userContext, req.body.memory, req.body.config));
 });
 
 app.post('/api/ai/generate-proactive-alerts', async (req, res) => {
-  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache));
+  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache, req.body.config));
 });
 
 app.get('/api/ai/health', async (_req, res) => {
-  const configured = Boolean(process.env.GEMINI_API_KEY);
+  const health = getRuntimeHealth();
   res.json({
-    configured,
-    backend: 'google-genai',
-    provider: 'Google API key via App Hosting secret',
+    configured: health.configured,
+    backend: 'runtime-configurable',
+    provider: health.provider,
+    defaultProviderConfigured: health.defaultProviderConfigured,
     timestamp: new Date().toISOString()
   });
 });
 
-app.post('/api/ai/test', async (_req, res) => {
+app.post('/api/ai/test', async (req, res) => {
   await handleAIRequest(res, async () => {
     const response = await generateReplyDraft(
       {
@@ -149,7 +151,7 @@ app.post('/api/ai/test', async (_req, res) => {
         body: 'Reply with exactly: AI connection OK'
       },
       'Reply with exactly: AI connection OK',
-      { model: 'gemini-3-flash-preview' }
+      req.body.config || { model: 'gemini-3-flash-preview', provider: 'gemini' }
     );
 
     return {

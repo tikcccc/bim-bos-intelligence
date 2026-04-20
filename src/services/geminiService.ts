@@ -1,15 +1,21 @@
 import { apiFetch } from "../lib/api";
 
 export interface GeminiConfig {
+  provider?: "gemini" | "qwen";
   apiKey?: string;
   model?: string;
   userRole?: string;
+  autoClassifyOnSync?: boolean;
 }
 
 export interface AIHealthStatus {
   configured: boolean;
   backend: string;
   provider: string;
+  defaultProviderConfigured?: {
+    gemini: boolean;
+    qwen: boolean;
+  };
   timestamp: string;
 }
 
@@ -99,6 +105,6 @@ export async function getAIHealth(): Promise<AIHealthStatus> {
   return response.json();
 }
 
-export async function testAIConnection(): Promise<{ ok: boolean; response: string }> {
-  return postAI<{ ok: boolean; response: string }>('test', {});
+export async function testAIConnection(config?: GeminiConfig): Promise<{ ok: boolean; response: string }> {
+  return postAI<{ ok: boolean; response: string }>('test', { config });
 }

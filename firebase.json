@@ -1,5 +1,9 @@
 {
+  "firestore": {
+    "rules": "firestore.rules"
+  },
   "hosting": {
+    "site": "jarvis-bom-intellgence",
     "public": "dist",
     "ignore": [
       "firebase.json",

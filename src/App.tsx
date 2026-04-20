@@ -3,7 +3,7 @@ import AuthGuard from './components/AuthGuard';
 import { Mail, Phone, Send, MessageSquare, FileText, CheckCircle, Settings, RefreshCw, LogOut, Search, Filter, ChevronRight, ChevronLeft, AlertCircle, Home, BarChart2, Users, User, HelpCircle, Bell, MoreVertical, Clock, Briefcase, Layers, CheckSquare, X, Trash2, Edit2, ArrowUpRight, ArrowDownRight, Upload, Sparkles, ChevronDown, Calendar, List, LayoutGrid, Server, Plus, Inbox, Archive, Send as SendIcon, TrendingUp } from 'lucide-react';
 import { auth, db } from './lib/firebase';
 import { apiFetch, API_BASE_URL, getApiUrl } from './lib/api';
-import { collection, query, onSnapshot, addDoc, updateDoc, doc, Timestamp, orderBy, deleteDoc, getDocFromServer, where, writeBatch, setDoc } from 'firebase/firestore';
+import { collection, query, onSnapshot, addDoc, updateDoc, doc, Timestamp, orderBy, deleteDoc, getDocFromServer, getDocs, where, writeBatch, setDoc } from 'firebase/firestore';
 import { classifyEmail, analyzeTender, createBidDraft, ocrDocument, generateReplyDraft, analyzeMeetingIntelligence, prioritizeTask, generateTaskAlerts, analyzeAccountHealth, generateStructuredProposal, improveProposalSection, getAIHealth, testAIConnection, AIHealthStatus } from './services/geminiService';
 import { routeIntent, generateProactiveAlerts } from './services/aiOrchestrator';
 import { AISidebar } from './components/AISidebar';
@@ -85,6 +85,7 @@ type Email = {
   from: string;
   body: string;
   receivedAt: string;
+  account?: string;
   aiClassification?: string;
   aiConfidence?: number;
   status: 'PENDING' | 'CONFIRMED' | 'REJECTED';
@@ -94,6 +95,31 @@ type Email = {
   summary?: string;
   attachments?: any[];
 };
+
+const AI_MODELS_BY_PROVIDER = {
+  gemini: [
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', desc: 'Fast and lower-cost for day-to-day analysis.' },
+    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', desc: 'Higher-quality reasoning for complex drafts and reviews.' }
+  ],
+  qwen: [
+    { id: 'qwen-plus', name: 'Qwen Plus', desc: 'Balanced general-purpose reasoning on DashScope compatible API.' },
+    { id: 'qwen-turbo', name: 'Qwen Turbo', desc: 'Faster, cheaper option for routine classification and chat.' },
+    { id: 'qwen-max', name: 'Qwen Max', desc: 'Heavier model for complex analysis and longer outputs.' }
+  ]
+} as const;
+
+const DEFAULT_ADMIN_EMAILS = ['elvis.wiki@gmail.com', 'chiutikhong11551@gmail.com'];
+const ADMIN_EMAILS = Array.from(
+  new Set(
+    [
+      ...DEFAULT_ADMIN_EMAILS,
+      ...(import.meta.env.VITE_ADMIN_EMAILS || '')
+        .split(',')
+        .map(email => email.trim())
+        .filter(Boolean)
+    ]
+  )
+);
 
 function BOSApp() {
   const [emails, setEmails] = useState<Email[]>([]);
@@ -204,16 +230,20 @@ function BOSApp() {
   const [allowUserEditTemplates, setAllowUserEditTemplates] = useState(true);
   const [emailFilter, setEmailFilter] = useState<'ALL' | 'UNREAD'>('ALL');
   const [emailCategoryFilter, setEmailCategoryFilter] = useState<string>('ALL');
-  const [settingsTab, setSettingsTab] = useState<'GENERAL' | 'CONNECTIONS' | 'PROMPTS' | 'TEMPLATES' | 'GEMINI'>('GENERAL');
+  const [settingsTab, setSettingsTab] = useState<'GENERAL' | 'CONNECTIONS' | 'PROMPTS' | 'TEMPLATES' | 'AI'>('GENERAL');
   const [emailConnections, setEmailConnections] = useState<any[]>([]);
+  const [isEmailConnectionsLoaded, setIsEmailConnectionsLoaded] = useState(false);
   const [syncDays, setSyncDays] = useState(7);
   const [syncConnectionIds, setSyncConnectionIds] = useState<string[]>([]);
   const [showSyncConfig, setShowSyncConfig] = useState(false);
   const [replyPrompt, setReplyPrompt] = useState('');
   const [aiReplyDraft, setAiReplyDraft] = useState<string | null>(null);
   const [isGeneratingReply, setIsGeneratingReply] = useState(false);
-  const [geminiConfig, setGeminiConfig] = useState<{ model: string }>({
-    model: 'gemini-3-flash-preview'
+  const [geminiConfig, setGeminiConfig] = useState<{ provider: 'gemini' | 'qwen'; model: string; apiKey?: string; autoClassifyOnSync?: boolean }>({
+    provider: 'gemini',
+    model: 'gemini-3-flash-preview',
+    apiKey: '',
+    autoClassifyOnSync: false
   });
   const [aiHealthStatus, setAiHealthStatus] = useState<AIHealthStatus | null>(null);
   const [isCheckingAIHealth, setIsCheckingAIHealth] = useState(false);
@@ -268,6 +298,15 @@ INSTRUCTIONS:
 5. Tone: Professional/Persuasive.
 6. Markdown format.`
   });
+
+  const canAccessEmail = (email: Email) => {
+    if (isAdmin) return true;
+
+    const currentUserEmail = auth.currentUser?.email || '';
+    if (!currentUserEmail) return false;
+
+    return email.account === currentUserEmail || email.uid?.startsWith(`${currentUserEmail}_`);
+  };
   const [formTemplateSettings, setFormTemplateSettings] = useState<any>({
     MEETING: { label: 'Meeting', color: '#175CD3', fields: ['projectName', 'participants', 'deadline', 'location'] },
     PROJECT: { label: 'Project', color: '#B54708', fields: ['projectName', 'clientName', 'deadline', 'technicalRequirements'] },
@@ -347,10 +386,25 @@ INSTRUCTIONS:
 
     const profileRef = doc(db, 'users', user.uid);
     const unsubscribe = onSnapshot(profileRef, async (snapshot) => {
+      const isPresetAdmin = ADMIN_EMAILS.includes(user.email || '');
+
       if (snapshot.exists()) {
         const data = snapshot.data() as UserProfile;
+
+        if (isPresetAdmin && data.role !== 'boss') {
+          const upgradedProfile: UserProfile = {
+            ...data,
+            role: 'boss',
+            lastLogin: new Date().toISOString()
+          };
+          await setDoc(profileRef, upgradedProfile, { merge: true });
+          setUserProfile(upgradedProfile);
+          setIsAdmin(true);
+          return;
+        }
+
         setUserProfile(data);
-        setIsAdmin(data.role === 'boss');
+        setIsAdmin(data.role === 'boss' || isPresetAdmin);
       } else {
         // Check for invitation
         const inviteQ = query(
@@ -360,8 +414,8 @@ INSTRUCTIONS:
         );
         const { getDocs } = await import('firebase/firestore');
         const inviteSnap = await getDocs(inviteQ);
-        
-        let initialRole: UserRole = user.email === 'elvis.wiki@gmail.com' ? 'boss' : 'sales';
+
+        let initialRole: UserRole = isPresetAdmin ? 'boss' : 'sales';
         
         if (!inviteSnap.empty) {
           const inviteData = inviteSnap.docs[0].data() as Invitation;
@@ -382,7 +436,7 @@ INSTRUCTIONS:
         const { setDoc } = await import('firebase/firestore');
         await setDoc(profileRef, newProfile);
         setUserProfile(newProfile);
-        setIsAdmin(newProfile.role === 'boss');
+        setIsAdmin(newProfile.role === 'boss' || isPresetAdmin);
       }
     });
 
@@ -508,12 +562,7 @@ INSTRUCTIONS:
       snapshot.docs.forEach(doc => {
         if (doc.id === 'prompts') setPromptSettings(doc.data() as any);
         if (doc.id === 'forms') setFormTemplateSettings(doc.data() as any);
-        if (doc.id === 'gemini') {
-          const data = doc.data() as { model?: string };
-          setGeminiConfig({ model: data.model || 'gemini-3-flash-preview' });
-        }
         if (doc.id === 'general') setAllowUserEditTemplates(doc.data()?.allowUserEditTemplates ?? true);
-        if (doc.id === 'email_connections') setEmailConnections(doc.data()?.connections || []);
       });
     }, (error) => {
       console.warn('Config fetch failed (might be permissions or missing collection):', error);
@@ -522,7 +571,90 @@ INSTRUCTIONS:
   }, []);
 
   useEffect(() => {
-    if (!showSettings || settingsTab !== 'GEMINI') return;
+    const emailConnectionsRef = doc(db, 'config', 'email_connections');
+    const unsubscribe = onSnapshot(emailConnectionsRef, async (snapshot) => {
+      if (snapshot.exists()) {
+        setEmailConnections(snapshot.data()?.connections || []);
+        setIsEmailConnectionsLoaded(true);
+        return;
+      }
+
+      try {
+        const legacySnapshot = await getDocs(query(collection(db, 'config'), where('id', '==', 'email_connections')));
+        if (!legacySnapshot.empty) {
+          const legacyConnections = legacySnapshot.docs[0].data()?.connections || [];
+          setEmailConnections(legacyConnections);
+          await setDoc(emailConnectionsRef, {
+            connections: legacyConnections,
+            updatedAt: new Date().toISOString(),
+            migratedFromLegacy: true
+          }, { merge: true });
+        } else {
+          setEmailConnections([]);
+        }
+      } catch (error) {
+        console.warn('Legacy email connections migration failed:', error);
+        setEmailConnections([]);
+      } finally {
+        setIsEmailConnectionsLoaded(true);
+      }
+    }, (error) => {
+      console.warn('Email connections fetch failed:', error);
+      setEmailConnections([]);
+      setIsEmailConnectionsLoaded(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const aiSettingsRef = doc(db, 'config', 'ai_settings');
+    const unsubscribe = onSnapshot(aiSettingsRef, async (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data() as {
+          provider?: 'gemini' | 'qwen';
+          model?: string;
+          apiKey?: string;
+          autoClassifyOnSync?: boolean;
+        };
+        const provider = data.provider === 'qwen' ? 'qwen' : 'gemini';
+        setGeminiConfig({
+          provider,
+          model: data.model || (provider === 'qwen' ? 'qwen-plus' : 'gemini-3-flash-preview'),
+          apiKey: data.apiKey || '',
+          autoClassifyOnSync: data.autoClassifyOnSync ?? false
+        });
+        return;
+      }
+
+      try {
+        const legacyGeminiRef = doc(db, 'config', 'gemini');
+        const legacyGeminiSnap = await getDocFromServer(legacyGeminiRef);
+        const legacyModel = legacyGeminiSnap.exists() ? (legacyGeminiSnap.data()?.model as string | undefined) : undefined;
+        setGeminiConfig({
+          provider: 'gemini',
+          model: legacyModel || 'gemini-3-flash-preview',
+          apiKey: '',
+          autoClassifyOnSync: false
+        });
+      } catch (error) {
+        console.warn('AI settings fallback fetch failed:', error);
+        setGeminiConfig({
+          provider: 'gemini',
+          model: 'gemini-3-flash-preview',
+          apiKey: '',
+          autoClassifyOnSync: false
+        });
+      }
+    }, (error) => {
+      console.warn('AI settings fetch failed:', error);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!showSettings || settingsTab !== 'AI') return;
 
     let cancelled = false;
     const loadAIHealth = async () => {
@@ -894,40 +1026,41 @@ INSTRUCTIONS:
 
   const handleSaveGeminiSettings = async () => {
     try {
-      await setDoc(doc(db, 'config', 'gemini'), { model: geminiConfig.model, updatedAt: new Date().toISOString() }, { merge: true });
-      toast.success('Gemini model updated');
+      await setDoc(doc(db, 'config', 'ai_settings'), {
+        provider: geminiConfig.provider,
+        model: geminiConfig.model,
+        apiKey: geminiConfig.apiKey || '',
+        autoClassifyOnSync: geminiConfig.autoClassifyOnSync ?? false,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      toast.success('AI settings updated');
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, 'config/gemini');
+      handleFirestoreError(err, OperationType.UPDATE, 'config/ai_settings');
     }
   };
 
   const handleTestAIConnection = async () => {
     setIsTestingAIConnection(true);
-    const toastId = toast.loading('Testing Gemini connection...');
+    const toastId = toast.loading(`Testing ${geminiConfig.provider === 'qwen' ? 'Qwen' : 'Gemini'} connection...`);
 
     try {
       const status = await getAIHealth();
       setAiHealthStatus(status);
 
-      if (!status.configured) {
-        toast.error('GEMINI_API_KEY is not configured in App Hosting secrets.', { id: toastId });
-        return;
-      }
-
-      const result = await testAIConnection();
+      const result = await testAIConnection(geminiConfig);
       if (result.ok) {
-        toast.success('Gemini connection is working.', {
+        toast.success(`${geminiConfig.provider === 'qwen' ? 'Qwen' : 'Gemini'} connection is working.`, {
           id: toastId,
           description: result.response
         });
       } else {
-        toast.error('Gemini responded, but the test output was unexpected.', {
+        toast.error('AI responded, but the test output was unexpected.', {
           id: toastId,
           description: result.response
         });
       }
     } catch (error: any) {
-      toast.error('Gemini connection test failed.', {
+      toast.error('AI connection test failed.', {
         id: toastId,
         description: error?.message || 'Unknown error'
       });
@@ -939,19 +1072,17 @@ INSTRUCTIONS:
   const handleSaveEmailConnections = async (updatedConnections: any[]) => {
     try {
       const configRef = doc(db, 'config', 'email_connections');
-      await updateDoc(configRef, { connections: updatedConnections, updatedAt: new Date().toISOString() });
-      toast.success('Connections updated');
+      await setDoc(
+        configRef,
+        {
+          connections: updatedConnections,
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+      toast.success('Connections saved');
     } catch (error) {
-      try {
-        await addDoc(collection(db, 'config'), { 
-          connections: updatedConnections, 
-          id: 'email_connections', 
-          updatedAt: new Date().toISOString() 
-        });
-        toast.success('Connections initialized');
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, 'config/email_connections');
-      }
+      handleFirestoreError(error, OperationType.UPDATE, 'config/email_connections');
     }
   };
 
@@ -1241,11 +1372,11 @@ INSTRUCTIONS:
         pendingQuotes: templates.filter(t => t.status === 'OPPORTUNITIES').slice(0, 3).map(t => ({ id: t.id, client: t.data?.client || 'Unknown', amount: t.data?.estimateValue || 0, daysPending: 2 })),
         activeTasks: tasks.filter(t => t.status !== 'done').slice(0, 5).map(t => ({ id: t.id, title: t.title, priority: t.priority.score, dueDate: t.due_date, status: t.status }))
       };
-      const alerts = await generateProactiveAlerts(userContext, cache);
+      const alerts = await generateProactiveAlerts(userContext, cache, geminiConfig);
       setAiAlerts(alerts);
     };
     if (activeTab === 'DASHBOARD' || activeTab === 'INTAKE') fetchAlerts();
-  }, [tenders, templates, emailConnections, tasks, activeTab, userContext]);
+  }, [tenders, templates, emailConnections, tasks, activeTab, userContext, geminiConfig]);
 
   const handleAiMessage = async (content: string) => {
     // 1. Add User Message
@@ -1253,7 +1384,7 @@ INSTRUCTIONS:
     setAiMemory(prev => ({ ...prev, history: [...prev.history, userMsg] }));
 
     // 2. Orchestrate
-    const response = await routeIntent(content, userContext, aiMemory);
+    const response = await routeIntent(content, userContext, aiMemory, geminiConfig);
     
     // 3. Handle Function Calls (Data Filling)
     if (response.functionCalls && response.functionCalls.length > 0) {
@@ -1402,23 +1533,25 @@ INSTRUCTIONS:
               const exists = emails.find(e => e.uid === email.uid);
               if (!exists) {
                 accountNewCount++;
-                let docRef = await addDoc(collection(db, 'emails'), {
+                const docRef = await addDoc(collection(db, 'emails'), {
                   ...email,
                   status: 'PENDING',
                   isRead: false,
                   receivedAt: email.receivedAt || new Date().toISOString()
                 });
 
-                try {
-                  const aiResult = await classifyEmail(email, promptSettings.classifyEmail, geminiConfig);
-                  await updateDoc(doc(db, 'emails', docRef.id), {
-                    aiClassification: aiResult.classification,
-                    aiConfidence: aiResult.confidence,
-                    extractedData: aiResult.extractedData,
-                    summary: aiResult.summary
-                  });
-                } catch (aiErr) {
-                  console.error('AI Classification failed:', email.uid, aiErr);
+                if (geminiConfig.autoClassifyOnSync) {
+                  try {
+                    const aiResult = await classifyEmail(email, promptSettings.classifyEmail, geminiConfig);
+                    await updateDoc(doc(db, 'emails', docRef.id), {
+                      aiClassification: aiResult.classification,
+                      aiConfidence: aiResult.confidence,
+                      extractedData: aiResult.extractedData,
+                      summary: aiResult.summary
+                    });
+                  } catch (aiErr) {
+                    console.error('AI Classification failed during sync:', email.uid, aiErr);
+                  }
                 }
               }
             }
@@ -1566,7 +1699,7 @@ INSTRUCTIONS:
       const otherEmails = emails.filter(e => 
         e.aiClassification === 'OTHER' && 
         !e.isDeleted && 
-        (isAdmin || e.uid === auth.currentUser?.uid)
+        canAccessEmail(e)
       );
       
       if (otherEmails.length === 0) return;
@@ -2214,14 +2347,12 @@ INSTRUCTIONS:
                 active={activeTab === 'SKILLS'} 
                 onClick={() => setActiveTab('SKILLS')} 
               />
-              {isAdmin && (
-                <NavItem 
-                  icon={<Server className="w-5 h-5" />} 
-                  label="Connection" 
-                  active={activeTab === 'CONNECTIONS'} 
-                  onClick={() => setActiveTab('CONNECTIONS')} 
-                />
-              )}
+              <NavItem 
+                icon={<Server className="w-5 h-5" />} 
+                label="Connection" 
+                active={activeTab === 'CONNECTIONS'} 
+                onClick={() => setActiveTab('CONNECTIONS')} 
+              />
             </nav>
           </div>
 
@@ -2392,7 +2523,9 @@ INSTRUCTIONS:
                             Select Accounts
                           </label>
                           <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                            {emailConnections.length === 0 ? (
+                            {!isEmailConnectionsLoaded ? (
+                              <p className="text-[10px] text-[#98A2B3] italic">Loading configured accounts...</p>
+                            ) : emailConnections.length === 0 ? (
                               <p className="text-[10px] text-[#98A2B3] italic">No accounts configured</p>
                             ) : (
                               emailConnections.map(conn => (
@@ -2465,9 +2598,9 @@ INSTRUCTIONS:
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard 
                       title={isAdmin ? "Total Company Intake" : "My Intake"} 
-                      value={emails.filter(e => isAdmin || e.uid === auth.currentUser?.uid).length} 
+                      value={emails.filter(canAccessEmail).length} 
                       icon={<Mail className="w-6 h-6 text-[#7F56D9]" />}
-                      trend={emails.filter(e => isAdmin || e.uid === auth.currentUser?.uid).filter(e => !e.isRead).length + " unread"}
+                      trend={emails.filter(canAccessEmail).filter(e => !e.isRead).length + " unread"}
                     />
                     <StatCard 
                       title={isAdmin ? "Strategic Accounts" : "My Accounts"} 
@@ -2963,7 +3096,7 @@ INSTRUCTIONS:
                       />
                     </div>
 
-                    {emailCategoryFilter === 'OTHER' && emails.filter(e => !e.isDeleted && e.aiClassification === 'OTHER' && (isAdmin || e.uid === auth.currentUser?.uid)).length > 0 && (
+                    {emailCategoryFilter === 'OTHER' && emails.filter(e => !e.isDeleted && e.aiClassification === 'OTHER' && canAccessEmail(e)).length > 0 && (
                       <button 
                         onClick={handleDeleteAllOther}
                         className="w-full py-2 bg-[#FEF3F2] text-[#B42318] border border-[#FDA29B] rounded-lg text-[11px] font-bold hover:bg-[#FEE4E2] transition-all flex items-center justify-center gap-2 shadow-sm"
@@ -2974,7 +3107,7 @@ INSTRUCTIONS:
                     )}
                   </div>
 
-                  {emails.filter(e => !e.isDeleted).filter(e => isAdmin || e.uid === auth.currentUser?.uid).length === 0 ? (
+                  {emails.filter(e => !e.isDeleted).filter(canAccessEmail).length === 0 ? (
                     <div className="p-12 text-center flex flex-col items-center gap-4">
                       <div className="w-12 h-12 bg-[#F9FAFB] rounded-full flex items-center justify-center">
                         <Mail className="w-6 h-6 text-[#98A2B3]" />
@@ -2984,7 +3117,7 @@ INSTRUCTIONS:
                   ) : (
                     emails
                       .filter(e => !e.isDeleted)
-                      .filter(e => isAdmin || e.uid === auth.currentUser?.uid)
+                      .filter(canAccessEmail)
                       .filter(e => {
                         if (!emailSearchTerm) return true;
                         const term = emailSearchTerm.toLowerCase();
@@ -4636,7 +4769,11 @@ INSTRUCTIONS:
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-xl font-bold text-[#101828]">Connections</h3>
-                      <p className="text-sm text-[#475467]">Currently {emailConnections.length} active email accounts configured for synchronization.</p>
+                      <p className="text-sm text-[#475467]">
+                        {isEmailConnectionsLoaded
+                          ? `Currently ${emailConnections.length} active email accounts configured for synchronization.`
+                          : 'Loading configured email accounts...'}
+                      </p>
                     </div>
                     <button 
                       onClick={() => {
@@ -4651,7 +4788,13 @@ INSTRUCTIONS:
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {emailConnections.length === 0 ? (
+                    {!isEmailConnectionsLoaded ? (
+                      <div className="col-span-full p-12 bg-white border border-[#EAECF0] rounded-2xl flex flex-col items-center justify-center text-center">
+                        <RefreshCw className="w-6 h-6 text-[#7F56D9] animate-spin mb-4" />
+                        <h4 className="text-sm font-bold text-[#101828] mb-1">Loading Email Connections</h4>
+                        <p className="text-xs text-[#667085] max-w-xs">Fetching your saved connection settings from Firestore...</p>
+                      </div>
+                    ) : emailConnections.length === 0 ? (
                       <div className="col-span-full p-12 bg-white border border-dashed border-[#EAECF0] rounded-2xl flex flex-col items-center justify-center text-center">
                         <div className="w-12 h-12 bg-[#F9FAFB] rounded-full flex items-center justify-center mb-4">
                           <Mail className="w-6 h-6 text-[#98A2B3]" />
@@ -6273,7 +6416,7 @@ INSTRUCTIONS:
                 {[
                   { id: 'GENERAL', label: 'General', icon: <Settings className="w-4 h-4" /> },
                   { id: 'CONNECTIONS', label: 'Connections', icon: <RefreshCw className="w-4 h-4" /> },
-                  { id: 'GEMINI', label: 'Gemini AI', icon: <Sparkles className="w-4 h-4" /> }
+                  { id: 'AI', label: 'AI Models', icon: <Sparkles className="w-4 h-4" /> }
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -6487,15 +6630,15 @@ INSTRUCTIONS:
                   </div>
                 )}
 
-                {settingsTab === 'GEMINI' && (
+                {settingsTab === 'AI' && (
                   <div className="space-y-6">
                     <div className="p-4 bg-purple-50 border border-purple-200 rounded-xl mb-4">
                       <div className="flex gap-3">
                         <Sparkles className="w-5 h-5 text-purple-600 shrink-0" />
                         <div>
-                          <p className="text-xs font-bold text-purple-800 mb-1">Advanced Model Engine</p>
+                          <p className="text-xs font-bold text-purple-800 mb-1">AI Provider Configuration</p>
                           <p className="text-[11px] text-purple-700 leading-relaxed">
-                            This App Hosting deployment uses a server-side `GEMINI_API_KEY` secret. Frontend users can choose the model, but the key stays in the backend runtime.
+                            Configure which model family the app should use. This screen now supports both Gemini and Qwen-compatible API keys.
                           </p>
                         </div>
                       </div>
@@ -6504,12 +6647,12 @@ INSTRUCTIONS:
                     <div className="rounded-xl border border-[#E4E7EC] bg-white p-4 space-y-4">
                       <div className="flex items-start justify-between gap-4">
                         <div>
-                          <h4 className="text-sm font-bold text-[#101828]">Secret Status</h4>
+                          <h4 className="text-sm font-bold text-[#101828]">Runtime Status</h4>
                           <p className="text-[11px] text-[#667085] mt-1 leading-relaxed">
-                            Google API key can technically be typed from the frontend, but that would expose it to the browser and defeat the App Hosting secret model. This screen keeps the key server-side and only lets the frontend verify status.
+                            Current backend: <span className="font-semibold text-[#101828]">{API_BASE_URL || 'same-origin /api'}</span>
                           </p>
                           <p className="text-[11px] text-[#667085] mt-2">
-                            Current backend: <span className="font-semibold text-[#101828]">{API_BASE_URL || 'same-origin /api'}</span>
+                            Saved provider: <span className="font-semibold text-[#101828] uppercase">{geminiConfig.provider}</span>
                           </p>
                         </div>
                         <button
@@ -6532,15 +6675,19 @@ INSTRUCTIONS:
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div className="rounded-lg border border-[#EAECF0] bg-[#F9FAFB] p-3">
-                          <p className="text-[10px] font-bold uppercase tracking-wide text-[#667085]">Backend Secret</p>
+                          <p className="text-[10px] font-bold uppercase tracking-wide text-[#667085]">Default Runtime Keys</p>
                           <p className={`mt-1 text-sm font-bold ${aiHealthStatus?.configured ? 'text-[#027A48]' : 'text-[#B42318]'}`}>
                             {aiHealthStatus ? (aiHealthStatus.configured ? 'Configured' : 'Missing') : 'Unknown'}
                           </p>
+                          <p className="mt-2 text-[11px] text-[#667085]">
+                            Gemini env: <span className="font-semibold text-[#101828]">{aiHealthStatus?.defaultProviderConfigured?.gemini ? 'Yes' : 'No'}</span>
+                            {' '}• Qwen env: <span className="font-semibold text-[#101828]">{aiHealthStatus?.defaultProviderConfigured?.qwen ? 'Yes' : 'No'}</span>
+                          </p>
                         </div>
                         <div className="rounded-lg border border-[#EAECF0] bg-[#F9FAFB] p-3">
-                          <p className="text-[10px] font-bold uppercase tracking-wide text-[#667085]">Provider</p>
+                          <p className="text-[10px] font-bold uppercase tracking-wide text-[#667085]">Saved API Key</p>
                           <p className="mt-1 text-sm font-bold text-[#101828]">
-                            {aiHealthStatus?.provider || 'Google API key via App Hosting secret'}
+                            {geminiConfig.apiKey ? 'Stored in Firestore config' : 'Using backend env only'}
                           </p>
                         </div>
                       </div>
@@ -6564,12 +6711,42 @@ INSTRUCTIONS:
 
                     <div className="space-y-4">
                       <div className="space-y-1.5">
-                        <label className="text-sm font-semibold text-[#344054]">AI Model Selection</label>
+                        <label className="text-sm font-semibold text-[#344054]">AI Provider</label>
                         <div className="grid grid-cols-1 gap-3">
                           {[
-                            { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', desc: 'Fastest, optimized for classification.' },
-                            { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', desc: 'Highest intelligence for complex analysis.' }
-                          ].map((m) => (
+                            { id: 'gemini', name: 'Gemini', desc: 'Google Gemini API key and Gemini model family.' },
+                            { id: 'qwen', name: 'Qwen', desc: 'Alibaba Cloud DashScope compatible API for Qwen models.' }
+                          ].map((provider) => (
+                            <button
+                              key={provider.id}
+                              onClick={() => {
+                                const nextProvider = provider.id as 'gemini' | 'qwen';
+                                setGeminiConfig({
+                                  ...geminiConfig,
+                                  provider: nextProvider,
+                                  model: AI_MODELS_BY_PROVIDER[nextProvider][0].id
+                                });
+                              }}
+                              className={`p-4 rounded-xl border-2 text-left transition-all ${
+                                geminiConfig.provider === provider.id
+                                  ? 'border-[#7F56D9] bg-[#F9F5FF]'
+                                  : 'border-[#EAECF0] hover:border-[#D0D5DD]'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-sm font-bold text-[#101828]">{provider.name}</span>
+                                {geminiConfig.provider === provider.id && <CheckCircle className="w-4 h-4 text-[#7F56D9]" />}
+                              </div>
+                              <p className="text-[11px] text-[#667085] leading-tight">{provider.desc}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-[#344054]">Model Selection</label>
+                        <div className="grid grid-cols-1 gap-3">
+                          {AI_MODELS_BY_PROVIDER[geminiConfig.provider].map((m) => (
                             <button
                               key={m.id}
                               onClick={() => setGeminiConfig({...geminiConfig, model: m.id})}
@@ -6588,6 +6765,33 @@ INSTRUCTIONS:
                           ))}
                         </div>
                       </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-[#344054]">API Key</label>
+                        <input
+                          type="password"
+                          value={geminiConfig.apiKey || ''}
+                          onChange={(e) => setGeminiConfig({ ...geminiConfig, apiKey: e.target.value })}
+                          className="w-full px-3 py-2 bg-white border border-[#D0D5DD] rounded-lg text-sm"
+                          placeholder={geminiConfig.provider === 'qwen' ? 'Enter Qwen / DashScope API key' : 'Enter Gemini API key'}
+                        />
+                        <p className="text-[11px] text-[#667085]">
+                          Leave this empty if you want to keep using backend environment variables. If you fill it here, it will be saved to Firestore config for admin-controlled runtime use.
+                        </p>
+                      </div>
+
+                      <label className="flex items-center gap-3 p-3 bg-[#F9FAFB] border border-[#D0D5DD] rounded-xl cursor-pointer hover:bg-[#F2F4F7] transition-all">
+                        <input
+                          type="checkbox"
+                          checked={geminiConfig.autoClassifyOnSync ?? false}
+                          onChange={(e) => setGeminiConfig({ ...geminiConfig, autoClassifyOnSync: e.target.checked })}
+                          className="w-4 h-4 rounded border-[#D0D5DD] text-[#7F56D9] focus:ring-[#7F56D9]"
+                        />
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-[#344054]">Auto AI classify on sync</p>
+                          <p className="text-[11px] text-[#667085]">When enabled, every newly synced email will immediately run through the current AI model. Keep this off if you want to save quota.</p>
+                        </div>
+                      </label>
                     </div>
 
                     <div className="pt-4 border-t border-[#EAECF0]">
@@ -6595,7 +6799,7 @@ INSTRUCTIONS:
                         onClick={handleSaveGeminiSettings}
                         className="w-full py-3 bg-[#7F56D9] text-white rounded-xl font-bold text-sm hover:bg-[#6941C6] transition-all"
                       >
-                        Save Model Configuration
+                        Save AI Configuration
                       </button>
                     </div>
                   </div>
