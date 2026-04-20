@@ -8,6 +8,7 @@ export interface AIConfig {
   apiKey?: string;
   userRole?: string;
   baseUrl?: string;
+  timeoutMs?: number;
 }
 
 interface InlineDataPayload {
@@ -34,11 +35,23 @@ export interface NormalizedAIError {
 }
 
 const DEFAULT_QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+const DEFAULT_AI_REQUEST_TIMEOUT_MS = 45_000;
+const MAX_AI_REQUEST_TIMEOUT_MS = 180_000;
 
 export const getDefaultModel = (provider: AIProvider) =>
   provider === "qwen" ? "qwen3.6-plus" : "gemini-2.5-flash";
 
 const cleanValue = (value?: string | null) => value?.trim().replace(/^["']|["']$/g, "") || "";
+
+const clampTimeout = (value: number) => Math.min(Math.max(value, 5_000), MAX_AI_REQUEST_TIMEOUT_MS);
+
+export const getAIRequestTimeoutMs = (config?: AIConfig) => {
+  const rawValue =
+    config?.timeoutMs ??
+    (Number.parseInt(cleanValue(process.env.AI_PROVIDER_TIMEOUT_MS), 10) || DEFAULT_AI_REQUEST_TIMEOUT_MS);
+
+  return clampTimeout(rawValue);
+};
 
 export const getQwenBaseUrl = (config?: AIConfig) =>
   cleanValue(config?.baseUrl) || cleanValue(process.env.QWEN_BASE_URL) || DEFAULT_QWEN_BASE_URL;
@@ -82,6 +95,9 @@ const parseStatusFromUnknown = (error: unknown) => {
   }
 
   const message = String((error as any)?.message || error || "");
+  if (/timed?\s*out|timeout|abort/i.test(message)) {
+    return 504;
+  }
   const statusMatch = message.match(/\b(400|401|403|404|408|409|422|429|500|502|503|504)\b/);
   return statusMatch ? Number(statusMatch[1]) : 500;
 };
@@ -91,6 +107,9 @@ const inferErrorCode = (status: number, message: string) => {
 
   if (lowerMessage.includes("api key") && (lowerMessage.includes("not configured") || lowerMessage.includes("no api key"))) {
     return "AI_MISSING_KEY";
+  }
+  if (status === 408 || status === 504 || lowerMessage.includes("timed out") || lowerMessage.includes("timeout") || lowerMessage.includes("abort")) {
+    return "AI_TIMEOUT";
   }
   if (status === 401 || status === 403 || lowerMessage.includes("invalid api key") || lowerMessage.includes("permission denied")) {
     return "AI_AUTH_FAILED";
@@ -130,6 +149,8 @@ const buildUserMessage = (code: string, provider: AIProvider, config?: AIConfig)
         return `Qwen rejected the credentials. Check whether the API key is valid for this endpoint (${baseUrl}). If your key was created in the China console, set QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1. For international keys, use https://dashscope-intl.aliyuncs.com/compatible-mode/v1.`;
       }
       return `${providerLabel} rejected the credentials. Check whether the API key is valid and has access to this model.`;
+    case "AI_TIMEOUT":
+      return `${providerLabel} took too long to respond. The backend waited longer than usual, but this request still timed out. Please retry or switch to a lighter model for this task.`;
     case "AI_PROVIDER_BUSY":
       return `${providerLabel} is temporarily busy. Please try again in a moment.`;
     case "AI_BAD_REQUEST":
@@ -148,7 +169,7 @@ export const normalizeAIError = (error: unknown, config?: AIConfig): AIProviderE
   const rawMessage = String((error as any)?.rawMessage || (error as any)?.message || error || "Unknown AI error");
   const status = parseStatusFromUnknown(error);
   const code = inferErrorCode(status, rawMessage);
-  const retryable = code === "AI_PROVIDER_BUSY";
+  const retryable = code === "AI_PROVIDER_BUSY" || code === "AI_TIMEOUT";
 
   return new AIProviderError({
     code,
@@ -220,6 +241,28 @@ const readQwenContent = (content: unknown) => {
   return "";
 };
 
+const buildTimeoutError = (timeoutMs: number) => ({
+  message: `AI request timed out after ${timeoutMs}ms.`,
+  status: 504
+});
+
+const withPromiseTimeout = async <T>(promise: Promise<T>, timeoutMs: number) => {
+  let timeoutId: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(buildTimeoutError(timeoutMs)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+};
+
 const buildProviderError = async (response: Response, config?: AIConfig) => {
   let message = `AI provider request failed with status ${response.status}.`;
 
@@ -279,28 +322,32 @@ export const parseJsonResponse = <T>(raw: string): T => JSON.parse(extractJsonTe
 
 export const generateText = async ({ prompt, config, systemInstruction, responseSchema, inlineData }: GenerateTextOptions) => {
   const resolved = resolveConfig(config);
+  const timeoutMs = getAIRequestTimeoutMs(config);
 
   if (resolved.provider === "gemini") {
     try {
       const ai = new GoogleGenAI({ apiKey: resolved.apiKey });
-      const response = await ai.models.generateContent({
-        model: resolved.model,
-        contents: [
-          {
-            role: "user",
-            parts: inlineData
-              ? [
-                  { text: prompt },
-                  { inlineData: { mimeType: inlineData.mimeType, data: inlineData.data } }
-                ]
-              : [{ text: prompt }]
+      const response = await withPromiseTimeout(
+        ai.models.generateContent({
+          model: resolved.model,
+          contents: [
+            {
+              role: "user",
+              parts: inlineData
+                ? [
+                    { text: prompt },
+                    { inlineData: { mimeType: inlineData.mimeType, data: inlineData.data } }
+                  ]
+                : [{ text: prompt }]
+            }
+          ],
+          config: {
+            ...(systemInstruction ? { systemInstruction } : {}),
+            ...(responseSchema ? { responseMimeType: "application/json", responseSchema } : {})
           }
-        ],
-        config: {
-          ...(systemInstruction ? { systemInstruction } : {}),
-          ...(responseSchema ? { responseMimeType: "application/json", responseSchema } : {})
-        }
-      });
+        }),
+        timeoutMs
+      );
 
       return response.text || "";
     } catch (error) {
@@ -308,30 +355,43 @@ export const generateText = async ({ prompt, config, systemInstruction, response
     }
   }
 
-  const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${resolved.apiKey}`
-    },
-    body: JSON.stringify({
-      model: resolved.model,
-      messages: [
-        ...(systemInstruction ? [{ role: "system", content: systemInstruction }] : []),
-        {
-          role: "user",
-          content: buildQwenUserContent(prompt, inlineData)
-        }
-      ]
-    })
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!response.ok) {
-    throw await buildProviderError(response, config);
+  try {
+    const response = await fetch(`${resolved.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${resolved.apiKey}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: resolved.model,
+        messages: [
+          ...(systemInstruction ? [{ role: "system", content: systemInstruction }] : []),
+          {
+            role: "user",
+            content: buildQwenUserContent(prompt, inlineData)
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw await buildProviderError(response, config);
+    }
+
+    const data = await response.json();
+    return readQwenContent(data?.choices?.[0]?.message?.content);
+  } catch (error) {
+    if ((error as any)?.name === "AbortError") {
+      throw normalizeAIError(buildTimeoutError(timeoutMs), config);
+    }
+    throw normalizeAIError(error, config);
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const data = await response.json();
-  return readQwenContent(data?.choices?.[0]?.message?.content);
 };
 
 export const generateJson = async <T>(options: GenerateTextOptions) => {

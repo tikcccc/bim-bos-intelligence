@@ -13,6 +13,7 @@ import { createRequire } from 'module';
 import { analyzeAccountHealth, analyzeMeetingIntelligence, analyzeTender, classifyEmail, createBidDraft, generateReplyDraft, generateStructuredProposal, generateTaskAlerts, improveProposalSection, ocrDocument, prioritizeTask } from './server/ai/geminiService';
 import { generateProactiveAlerts, routeIntent } from './server/ai/aiOrchestrator';
 import { getRuntimeHealth, normalizeAIError } from './server/ai/aiProvider';
+import type { AIConfig } from './server/ai/aiProvider';
 const require = createRequire(import.meta.url);
 
 dotenv.config();
@@ -67,12 +68,36 @@ let sessionEmailPassword = process.env.EMAIL_PASSWORD || '';
 const upload = multer({ storage: multer.memoryStorage() });
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const DEFAULT_AI_ROUTE_TIMEOUT_MS = Number(process.env.AI_ROUTE_TIMEOUT_MS || 60_000);
+const DEFAULT_AI_PROVIDER_TIMEOUT_MS = Number(process.env.AI_PROVIDER_TIMEOUT_MS || 55_000);
+const HEAVY_AI_ROUTE_TIMEOUT_MS = Number(process.env.AI_HEAVY_ROUTE_TIMEOUT_MS || 125_000);
+const HEAVY_AI_PROVIDER_TIMEOUT_MS = Number(process.env.AI_HEAVY_PROVIDER_TIMEOUT_MS || 115_000);
+
+const clampTimeout = (timeoutMs: number) => Math.min(Math.max(timeoutMs, 5_000), 180_000);
+
+const withAIConfig = (config: AIConfig | undefined, providerTimeoutMs = DEFAULT_AI_PROVIDER_TIMEOUT_MS): AIConfig => ({
+  ...(config || {}),
+  timeoutMs: clampTimeout(config?.timeoutMs ?? providerTimeoutMs)
+});
+
+const setAIRequestTimeout = (res: express.Response, timeoutMs: number) => {
+  const clamped = clampTimeout(timeoutMs);
+  res.setTimeout(clamped);
+  res.req?.setTimeout(clamped);
+  res.socket?.setTimeout(clamped);
+};
 
 const handleAIRequest = async (
   res: express.Response,
   runner: () => Promise<unknown>,
-  config?: { provider?: 'gemini' | 'qwen'; model?: string; apiKey?: string; userRole?: string; baseUrl?: string }
+  options?: {
+    config?: AIConfig;
+    requestTimeoutMs?: number;
+  }
 ) => {
+  const config = withAIConfig(options?.config);
+  setAIRequestTimeout(res, options?.requestTimeoutMs ?? DEFAULT_AI_ROUTE_TIMEOUT_MS);
+
   try {
     const result = await runner();
     res.json({ result });
@@ -99,55 +124,88 @@ const handleAIRequest = async (
 };
 
 app.post('/api/ai/classify-email', async (req, res) => {
-  await handleAIRequest(res, () => classifyEmail(req.body.email, req.body.customPrompt, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config, HEAVY_AI_PROVIDER_TIMEOUT_MS);
+  await handleAIRequest(
+    res,
+    () => classifyEmail(req.body.email, req.body.customPrompt, config),
+    { config, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS }
+  );
 });
 
 app.post('/api/ai/analyze-tender', async (req, res) => {
-  await handleAIRequest(res, () => analyzeTender(req.body.tenderText, req.body.customPrompt, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config, HEAVY_AI_PROVIDER_TIMEOUT_MS);
+  await handleAIRequest(
+    res,
+    () => analyzeTender(req.body.tenderText, req.body.customPrompt, config),
+    { config, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS }
+  );
 });
 
 app.post('/api/ai/create-bid-draft', async (req, res) => {
-  await handleAIRequest(res, () => createBidDraft(req.body.tenderAnalysis, req.body.customPrompt, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => createBidDraft(req.body.tenderAnalysis, req.body.customPrompt, config), { config });
 });
 
 app.post('/api/ai/ocr-document', async (req, res) => {
-  await handleAIRequest(res, () => ocrDocument(req.body.base64Data, req.body.mimeType, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => ocrDocument(req.body.base64Data, req.body.mimeType, config), { config });
 });
 
 app.post('/api/ai/analyze-meeting-intelligence', async (req, res) => {
-  await handleAIRequest(res, () => analyzeMeetingIntelligence(req.body.notes, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => analyzeMeetingIntelligence(req.body.notes, config), { config });
 });
 
 app.post('/api/ai/generate-reply-draft', async (req, res) => {
-  await handleAIRequest(res, () => generateReplyDraft(req.body.email, req.body.userPrompt, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config, HEAVY_AI_PROVIDER_TIMEOUT_MS);
+  await handleAIRequest(
+    res,
+    () => generateReplyDraft(req.body.email, req.body.userPrompt, config),
+    { config, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS }
+  );
 });
 
 app.post('/api/ai/prioritize-task', async (req, res) => {
-  await handleAIRequest(res, () => prioritizeTask(req.body.task, req.body.context, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => prioritizeTask(req.body.task, req.body.context, config), { config });
 });
 
 app.post('/api/ai/generate-task-alerts', async (req, res) => {
-  await handleAIRequest(res, () => generateTaskAlerts(req.body.tasks, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => generateTaskAlerts(req.body.tasks, config), { config });
 });
 
 app.post('/api/ai/analyze-account-health', async (req, res) => {
-  await handleAIRequest(res, () => analyzeAccountHealth(req.body.account, req.body.interactions, req.body.opportunities, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => analyzeAccountHealth(req.body.account, req.body.interactions, req.body.opportunities, config), { config });
 });
 
 app.post('/api/ai/generate-structured-proposal', async (req, res) => {
-  await handleAIRequest(res, () => generateStructuredProposal(req.body.context, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config, HEAVY_AI_PROVIDER_TIMEOUT_MS);
+  await handleAIRequest(
+    res,
+    () => generateStructuredProposal(req.body.context, config),
+    { config, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS }
+  );
 });
 
 app.post('/api/ai/improve-proposal-section', async (req, res) => {
-  await handleAIRequest(res, () => improveProposalSection(req.body.sectionContent, req.body.instruction, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => improveProposalSection(req.body.sectionContent, req.body.instruction, config), { config });
 });
 
 app.post('/api/ai/route-intent', async (req, res) => {
-  await handleAIRequest(res, () => routeIntent(req.body.message, req.body.userContext, req.body.memory, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config, HEAVY_AI_PROVIDER_TIMEOUT_MS);
+  await handleAIRequest(
+    res,
+    () => routeIntent(req.body.message, req.body.userContext, req.body.memory, config),
+    { config, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS }
+  );
 });
 
 app.post('/api/ai/generate-proactive-alerts', async (req, res) => {
-  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache, req.body.config), req.body.config);
+  const config = withAIConfig(req.body.config);
+  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache, config), { config });
 });
 
 app.get('/api/ai/health', async (_req, res) => {
@@ -163,7 +221,7 @@ app.get('/api/ai/health', async (_req, res) => {
 });
 
 app.post('/api/ai/test', async (req, res) => {
-  const testConfig = req.body.config || { model: 'gemini-2.5-flash', provider: 'gemini' };
+  const testConfig = withAIConfig(req.body.config || { model: 'gemini-2.5-flash', provider: 'gemini' }, HEAVY_AI_PROVIDER_TIMEOUT_MS);
 
   await handleAIRequest(res, async () => {
     const maxAttempts = 3;
@@ -199,7 +257,7 @@ app.post('/api/ai/test', async (req, res) => {
     }
 
     throw lastError;
-  }, testConfig);
+  }, { config: testConfig, requestTimeoutMs: HEAVY_AI_ROUTE_TIMEOUT_MS });
 });
 
 app.post('/api/tenders/upload', upload.array('files'), async (req: any, res) => {
