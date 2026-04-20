@@ -12,7 +12,7 @@ import nodemailer from 'nodemailer';
 import { createRequire } from 'module';
 import { analyzeAccountHealth, analyzeMeetingIntelligence, analyzeTender, classifyEmail, createBidDraft, generateReplyDraft, generateStructuredProposal, generateTaskAlerts, improveProposalSection, ocrDocument, prioritizeTask } from './server/ai/geminiService';
 import { generateProactiveAlerts, routeIntent } from './server/ai/aiOrchestrator';
-import { getRuntimeHealth } from './server/ai/aiProvider';
+import { getRuntimeHealth, normalizeAIError } from './server/ai/aiProvider';
 const require = createRequire(import.meta.url);
 
 dotenv.config();
@@ -66,69 +66,88 @@ let sessionEmailPassword = process.env.EMAIL_PASSWORD || '';
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const handleAIRequest = async (res: express.Response, runner: () => Promise<unknown>) => {
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const handleAIRequest = async (
+  res: express.Response,
+  runner: () => Promise<unknown>,
+  config?: { provider?: 'gemini' | 'qwen'; model?: string; apiKey?: string; userRole?: string; baseUrl?: string }
+) => {
   try {
     const result = await runner();
     res.json({ result });
   } catch (error: any) {
-    console.error('AI request failed:', error);
-    res.status(error?.status || 500).json({
+    const normalized = normalizeAIError(error, config);
+    console.error('AI request failed:', {
+      code: normalized.code,
+      status: normalized.status,
+      retryable: normalized.retryable,
+      provider: normalized.provider,
+      model: normalized.model,
+      details: normalized.rawMessage
+    });
+    res.status(normalized.status || 500).json({
       error: 'AI request failed',
-      details: error?.message || 'Unknown AI error'
+      code: normalized.code,
+      details: normalized.rawMessage,
+      userMessage: normalized.userMessage,
+      retryable: normalized.retryable,
+      provider: normalized.provider,
+      model: normalized.model
     });
   }
 };
 
 app.post('/api/ai/classify-email', async (req, res) => {
-  await handleAIRequest(res, () => classifyEmail(req.body.email, req.body.customPrompt, req.body.config));
+  await handleAIRequest(res, () => classifyEmail(req.body.email, req.body.customPrompt, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/analyze-tender', async (req, res) => {
-  await handleAIRequest(res, () => analyzeTender(req.body.tenderText, req.body.customPrompt, req.body.config));
+  await handleAIRequest(res, () => analyzeTender(req.body.tenderText, req.body.customPrompt, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/create-bid-draft', async (req, res) => {
-  await handleAIRequest(res, () => createBidDraft(req.body.tenderAnalysis, req.body.customPrompt, req.body.config));
+  await handleAIRequest(res, () => createBidDraft(req.body.tenderAnalysis, req.body.customPrompt, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/ocr-document', async (req, res) => {
-  await handleAIRequest(res, () => ocrDocument(req.body.base64Data, req.body.mimeType, req.body.config));
+  await handleAIRequest(res, () => ocrDocument(req.body.base64Data, req.body.mimeType, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/analyze-meeting-intelligence', async (req, res) => {
-  await handleAIRequest(res, () => analyzeMeetingIntelligence(req.body.notes, req.body.config));
+  await handleAIRequest(res, () => analyzeMeetingIntelligence(req.body.notes, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/generate-reply-draft', async (req, res) => {
-  await handleAIRequest(res, () => generateReplyDraft(req.body.email, req.body.userPrompt, req.body.config));
+  await handleAIRequest(res, () => generateReplyDraft(req.body.email, req.body.userPrompt, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/prioritize-task', async (req, res) => {
-  await handleAIRequest(res, () => prioritizeTask(req.body.task, req.body.context, req.body.config));
+  await handleAIRequest(res, () => prioritizeTask(req.body.task, req.body.context, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/generate-task-alerts', async (req, res) => {
-  await handleAIRequest(res, () => generateTaskAlerts(req.body.tasks, req.body.config));
+  await handleAIRequest(res, () => generateTaskAlerts(req.body.tasks, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/analyze-account-health', async (req, res) => {
-  await handleAIRequest(res, () => analyzeAccountHealth(req.body.account, req.body.interactions, req.body.opportunities, req.body.config));
+  await handleAIRequest(res, () => analyzeAccountHealth(req.body.account, req.body.interactions, req.body.opportunities, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/generate-structured-proposal', async (req, res) => {
-  await handleAIRequest(res, () => generateStructuredProposal(req.body.context, req.body.config));
+  await handleAIRequest(res, () => generateStructuredProposal(req.body.context, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/improve-proposal-section', async (req, res) => {
-  await handleAIRequest(res, () => improveProposalSection(req.body.sectionContent, req.body.instruction, req.body.config));
+  await handleAIRequest(res, () => improveProposalSection(req.body.sectionContent, req.body.instruction, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/route-intent', async (req, res) => {
-  await handleAIRequest(res, () => routeIntent(req.body.message, req.body.userContext, req.body.memory, req.body.config));
+  await handleAIRequest(res, () => routeIntent(req.body.message, req.body.userContext, req.body.memory, req.body.config), req.body.config);
 });
 
 app.post('/api/ai/generate-proactive-alerts', async (req, res) => {
-  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache, req.body.config));
+  await handleAIRequest(res, () => generateProactiveAlerts(req.body.userContext, req.body.businessCache, req.body.config), req.body.config);
 });
 
 app.get('/api/ai/health', async (_req, res) => {
@@ -137,28 +156,50 @@ app.get('/api/ai/health', async (_req, res) => {
     configured: health.configured,
     backend: 'runtime-configurable',
     provider: health.provider,
+    qwenBaseUrl: health.qwenBaseUrl,
     defaultProviderConfigured: health.defaultProviderConfigured,
     timestamp: new Date().toISOString()
   });
 });
 
 app.post('/api/ai/test', async (req, res) => {
-  await handleAIRequest(res, async () => {
-    const response = await generateReplyDraft(
-      {
-        from: 'system@isbim.local',
-        subject: 'AI connectivity check',
-        body: 'Reply with exactly: AI connection OK'
-      },
-      'Reply with exactly: AI connection OK',
-      req.body.config || { model: 'gemini-3-flash-preview', provider: 'gemini' }
-    );
+  const testConfig = req.body.config || { model: 'gemini-2.5-flash', provider: 'gemini' };
 
-    return {
-      ok: response.toLowerCase().includes('ai connection ok'),
-      response
-    };
-  });
+  await handleAIRequest(res, async () => {
+    const maxAttempts = 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await generateReplyDraft(
+          {
+            from: 'system@isbim.local',
+            subject: 'AI connectivity check',
+            body: 'Reply with exactly: AI connection OK'
+          },
+          'Reply with exactly: AI connection OK',
+          testConfig
+        );
+
+        return {
+          ok: response.toLowerCase().includes('ai connection ok'),
+          response,
+          attempts: attempt
+        };
+      } catch (error) {
+        const normalized = normalizeAIError(error, testConfig);
+        lastError = normalized;
+
+        if (!normalized.retryable || attempt === maxAttempts) {
+          throw normalized;
+        }
+
+        await wait(400 * attempt);
+      }
+    }
+
+    throw lastError;
+  }, testConfig);
 });
 
 app.post('/api/tenders/upload', upload.array('files'), async (req: any, res) => {

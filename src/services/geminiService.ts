@@ -12,11 +12,39 @@ export interface AIHealthStatus {
   configured: boolean;
   backend: string;
   provider: string;
+  qwenBaseUrl?: string;
   defaultProviderConfigured?: {
     gemini: boolean;
     qwen: boolean;
   };
   timestamp: string;
+}
+
+export interface AIRequestErrorInfo {
+  code?: string;
+  details?: string;
+  userMessage: string;
+  retryable?: boolean;
+  provider?: string;
+  model?: string;
+}
+
+export class AIRequestError extends Error {
+  code?: string;
+  details?: string;
+  retryable?: boolean;
+  provider?: string;
+  model?: string;
+
+  constructor(info: AIRequestErrorInfo) {
+    super(info.userMessage);
+    this.name = "AIRequestError";
+    this.code = info.code;
+    this.details = info.details;
+    this.retryable = info.retryable;
+    this.provider = info.provider;
+    this.model = info.model;
+  }
 }
 
 async function postAI<T>(path: string, payload: Record<string, unknown>): Promise<T> {
@@ -27,14 +55,23 @@ async function postAI<T>(path: string, payload: Record<string, unknown>): Promis
   });
 
   if (!response.ok) {
-    let message = "AI request failed.";
+    let errorInfo: AIRequestErrorInfo = {
+      userMessage: "AI request failed."
+    };
     try {
       const data = await response.json();
-      message = data.details || data.error || message;
+      errorInfo = {
+        code: data.code,
+        details: data.details || data.error,
+        userMessage: data.userMessage || data.details || data.error || errorInfo.userMessage,
+        retryable: data.retryable,
+        provider: data.provider,
+        model: data.model
+      };
     } catch {
       // Ignore JSON parsing errors and use the fallback message.
     }
-    throw new Error(message);
+    throw new AIRequestError(errorInfo);
   }
 
   const data = await response.json();
@@ -105,6 +142,6 @@ export async function getAIHealth(): Promise<AIHealthStatus> {
   return response.json();
 }
 
-export async function testAIConnection(config?: GeminiConfig): Promise<{ ok: boolean; response: string }> {
-  return postAI<{ ok: boolean; response: string }>('test', { config });
+export async function testAIConnection(config?: GeminiConfig): Promise<{ ok: boolean; response: string; attempts?: number }> {
+  return postAI<{ ok: boolean; response: string; attempts?: number }>('test', { config });
 }

@@ -4,7 +4,7 @@ import { Mail, Phone, Send, MessageSquare, FileText, CheckCircle, Settings, Refr
 import { auth, db } from './lib/firebase';
 import { apiFetch, API_BASE_URL, getApiUrl } from './lib/api';
 import { collection, query, onSnapshot, addDoc, updateDoc, doc, Timestamp, orderBy, deleteDoc, getDocFromServer, getDocs, where, writeBatch, setDoc } from 'firebase/firestore';
-import { classifyEmail, analyzeTender, createBidDraft, ocrDocument, generateReplyDraft, analyzeMeetingIntelligence, prioritizeTask, generateTaskAlerts, analyzeAccountHealth, generateStructuredProposal, improveProposalSection, getAIHealth, testAIConnection, AIHealthStatus } from './services/geminiService';
+import { classifyEmail, analyzeTender, createBidDraft, ocrDocument, generateReplyDraft, analyzeMeetingIntelligence, prioritizeTask, generateTaskAlerts, analyzeAccountHealth, generateStructuredProposal, improveProposalSection, getAIHealth, testAIConnection, AIHealthStatus, AIRequestError } from './services/geminiService';
 import { routeIntent, generateProactiveAlerts } from './services/aiOrchestrator';
 import { AISidebar } from './components/AISidebar';
 import { AiAssistantWorkspace } from './components/AiAssistantWorkspace';
@@ -58,6 +58,54 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
   throw new Error(JSON.stringify(errInfo));
 }
 
+function getAIErrorDescription(error: unknown) {
+  if (error instanceof AIRequestError) {
+    return error.details
+      ? `${error.message} Technical details: ${error.details}`
+      : error.message;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return 'Unknown error';
+}
+
+function showAIErrorToast(options: { title: string; error: unknown; id?: string | number }) {
+  toast.error(options.title, {
+    id: options.id,
+    description: getAIErrorDescription(options.error)
+  });
+}
+
+function sanitizeFirestoreValue<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => sanitizeFirestoreValue(item))
+      .filter(item => item !== undefined) as T;
+  }
+
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([key, entryValue]) => [key, sanitizeFirestoreValue(entryValue)] as const)
+      .filter(([, entryValue]) => entryValue !== undefined);
+
+    return Object.fromEntries(entries) as T;
+  }
+
+  return value;
+}
+
+function buildEmailAIUpdate(aiResult: any) {
+  return sanitizeFirestoreValue({
+    aiClassification: aiResult?.classification,
+    aiConfidence: aiResult?.confidence,
+    extractedData: aiResult?.extractedData,
+    summary: aiResult?.summary
+  });
+}
+
 async function logAuditEvent(action: string, module: string, recordId?: string, details?: any) {
   try {
     const user = auth.currentUser;
@@ -98,15 +146,22 @@ type Email = {
 
 const AI_MODELS_BY_PROVIDER = {
   gemini: [
-    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', desc: 'Fast and lower-cost for day-to-day analysis.' },
-    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', desc: 'Higher-quality reasoning for complex drafts and reviews.' }
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', desc: 'Preview Gemini 3 Flash model for fast general-purpose analysis.' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: 'Lower-latency production option for routine AI workflows.' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', desc: 'Higher-quality reasoning model for more complex analysis and reviews.' }
   ],
   qwen: [
-    { id: 'qwen-plus', name: 'Qwen Plus', desc: 'Balanced general-purpose reasoning on DashScope compatible API.' },
-    { id: 'qwen-turbo', name: 'Qwen Turbo', desc: 'Faster, cheaper option for routine classification and chat.' },
-    { id: 'qwen-max', name: 'Qwen Max', desc: 'Heavier model for complex analysis and longer outputs.' }
+    { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus', desc: 'Recommended general-purpose Qwen model via DashScope compatible API.' },
+    { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus', desc: 'Stable fallback option for routine analysis and drafting.' }
   ]
 } as const;
+
+const getDefaultAIModel = (provider: 'gemini' | 'qwen') => AI_MODELS_BY_PROVIDER[provider][0].id;
+
+const getValidAIModel = (provider: 'gemini' | 'qwen', model?: string) =>
+  AI_MODELS_BY_PROVIDER[provider].some(option => option.id === model)
+    ? model as string
+    : getDefaultAIModel(provider);
 
 const DEFAULT_ADMIN_EMAILS = ['elvis.wiki@gmail.com', 'chiutikhong11551@gmail.com'];
 const ADMIN_EMAILS = Array.from(
@@ -241,7 +296,7 @@ function BOSApp() {
   const [isGeneratingReply, setIsGeneratingReply] = useState(false);
   const [geminiConfig, setGeminiConfig] = useState<{ provider: 'gemini' | 'qwen'; model: string; apiKey?: string; autoClassifyOnSync?: boolean }>({
     provider: 'gemini',
-    model: 'gemini-3-flash-preview',
+    model: getDefaultAIModel('gemini'),
     apiKey: '',
     autoClassifyOnSync: false
   });
@@ -620,8 +675,8 @@ INSTRUCTIONS:
         const provider = data.provider === 'qwen' ? 'qwen' : 'gemini';
         setGeminiConfig({
           provider,
-          model: data.model || (provider === 'qwen' ? 'qwen-plus' : 'gemini-3-flash-preview'),
-          apiKey: data.apiKey || '',
+          model: getValidAIModel(provider, data.model),
+          apiKey: provider === 'qwen' ? '' : (data.apiKey || ''),
           autoClassifyOnSync: data.autoClassifyOnSync ?? false
         });
         return;
@@ -633,7 +688,7 @@ INSTRUCTIONS:
         const legacyModel = legacyGeminiSnap.exists() ? (legacyGeminiSnap.data()?.model as string | undefined) : undefined;
         setGeminiConfig({
           provider: 'gemini',
-          model: legacyModel || 'gemini-3-flash-preview',
+          model: getValidAIModel('gemini', legacyModel),
           apiKey: '',
           autoClassifyOnSync: false
         });
@@ -641,7 +696,7 @@ INSTRUCTIONS:
         console.warn('AI settings fallback fetch failed:', error);
         setGeminiConfig({
           provider: 'gemini',
-          model: 'gemini-3-flash-preview',
+          model: getDefaultAIModel('gemini'),
           apiKey: '',
           autoClassifyOnSync: false
         });
@@ -843,7 +898,7 @@ INSTRUCTIONS:
       });
       toast.success('Task prioritized by AI!', { id: prioritizeToast });
     } catch (err) {
-      toast.error('AI Prioritization failed.', { id: prioritizeToast });
+      showAIErrorToast({ title: 'AI prioritization failed.', error: err, id: prioritizeToast });
     } finally {
       setIsPrioritizing(false);
     }
@@ -960,7 +1015,7 @@ INSTRUCTIONS:
       setSelectedMeeting({ id: newMeetingId, ...meetingData } as Meeting);
     } catch (error) {
       console.error('Meeting analysis failed:', error);
-      toast.error('Failed to analyze meeting. Please try again.', { id: analyzeToast });
+      showAIErrorToast({ title: 'Meeting analysis failed.', error, id: analyzeToast });
     } finally {
       setIsAnalyzingMeeting(false);
     }
@@ -1026,10 +1081,11 @@ INSTRUCTIONS:
 
   const handleSaveGeminiSettings = async () => {
     try {
+      const apiKeyToStore = geminiConfig.provider === 'qwen' ? '' : (geminiConfig.apiKey || '');
       await setDoc(doc(db, 'config', 'ai_settings'), {
         provider: geminiConfig.provider,
         model: geminiConfig.model,
-        apiKey: geminiConfig.apiKey || '',
+        apiKey: apiKeyToStore,
         autoClassifyOnSync: geminiConfig.autoClassifyOnSync ?? false,
         updatedAt: new Date().toISOString()
       }, { merge: true });
@@ -1051,7 +1107,9 @@ INSTRUCTIONS:
       if (result.ok) {
         toast.success(`${geminiConfig.provider === 'qwen' ? 'Qwen' : 'Gemini'} connection is working.`, {
           id: toastId,
-          description: result.response
+          description: result.attempts && result.attempts > 1
+            ? `${result.response} Recovered after ${result.attempts} attempts.`
+            : result.response
         });
       } else {
         toast.error('AI responded, but the test output was unexpected.', {
@@ -1059,11 +1117,8 @@ INSTRUCTIONS:
           description: result.response
         });
       }
-    } catch (error: any) {
-      toast.error('AI connection test failed.', {
-        id: toastId,
-        description: error?.message || 'Unknown error'
-      });
+    } catch (error) {
+      showAIErrorToast({ title: 'AI connection test failed.', error, id: toastId });
     } finally {
       setIsTestingAIConnection(false);
     }
@@ -1303,7 +1358,7 @@ INSTRUCTIONS:
       toast.success('AI Draft Generated');
     } catch (error) {
       console.error('AI Generation Failed:', error);
-      toast.error('Failed to generate proposal sections');
+      showAIErrorToast({ title: 'Proposal generation failed.', error });
     } finally {
       setIsGeneratingProposal(false);
     }
@@ -1356,7 +1411,7 @@ INSTRUCTIONS:
       
       toast.success('Health analysis complete', { id: toastId });
     } catch (error) {
-      toast.error('Failed to analyze account health', { id: toastId });
+      showAIErrorToast({ title: 'Account health analysis failed.', error, id: toastId });
     } finally {
       setIsAnalyzingAccount(false);
     }
@@ -1383,8 +1438,21 @@ INSTRUCTIONS:
     const userMsg = { role: 'user' as const, content, timestamp: new Date().toISOString() };
     setAiMemory(prev => ({ ...prev, history: [...prev.history, userMsg] }));
 
-    // 2. Orchestrate
-    const response = await routeIntent(content, userContext, aiMemory, geminiConfig);
+    let response;
+    try {
+      // 2. Orchestrate
+      response = await routeIntent(content, userContext, aiMemory, geminiConfig);
+    } catch (error) {
+      console.error('AI assistant request failed:', error);
+      showAIErrorToast({ title: 'AI assistant request failed.', error });
+      const aiErrorMsg = {
+        role: 'model' as const,
+        content: 'I ran into an AI connection problem while processing that request. Please try again.',
+        timestamp: new Date().toISOString()
+      };
+      setAiMemory(prev => ({ ...prev, history: [...prev.history, aiErrorMsg] }));
+      return;
+    }
     
     // 3. Handle Function Calls (Data Filling)
     if (response.functionCalls && response.functionCalls.length > 0) {
@@ -1449,7 +1517,7 @@ INSTRUCTIONS:
           }
         } catch (err) {
           console.error("AI Tool Execution Failed:", err);
-          toast.error("AI was unable to complete the requested action.");
+          showAIErrorToast({ title: 'AI action failed.', error: err });
         }
       }
     }
@@ -1543,12 +1611,7 @@ INSTRUCTIONS:
                 if (geminiConfig.autoClassifyOnSync) {
                   try {
                     const aiResult = await classifyEmail(email, promptSettings.classifyEmail, geminiConfig);
-                    await updateDoc(doc(db, 'emails', docRef.id), {
-                      aiClassification: aiResult.classification,
-                      aiConfidence: aiResult.confidence,
-                      extractedData: aiResult.extractedData,
-                      summary: aiResult.summary
-                    });
+                    await updateDoc(doc(db, 'emails', docRef.id), buildEmailAIUpdate(aiResult));
                   } catch (aiErr) {
                     console.error('AI Classification failed during sync:', email.uid, aiErr);
                   }
@@ -1725,27 +1788,20 @@ INSTRUCTIONS:
     const analyzeToast = toast.loading('AI is re-analyzing email...');
     try {
       const aiResult = await classifyEmail(email, promptSettings.classifyEmail, geminiConfig);
+      const emailAIUpdate = buildEmailAIUpdate(aiResult);
       try {
-        await updateDoc(doc(db, 'emails', email.id), {
-          aiClassification: aiResult.classification,
-          aiConfidence: aiResult.confidence,
-          extractedData: aiResult.extractedData,
-          summary: aiResult.summary
-        });
+        await updateDoc(doc(db, 'emails', email.id), emailAIUpdate);
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `emails/${email.id}`);
       }
       setSelectedEmail({
         ...email,
-        aiClassification: aiResult.classification,
-        aiConfidence: aiResult.confidence,
-        extractedData: aiResult.extractedData,
-        summary: aiResult.summary
+        ...emailAIUpdate
       });
       toast.success('Re-analysis complete', { id: analyzeToast });
     } catch (error) {
       console.error('Re-analysis failed:', error);
-      toast.error('Re-analysis failed', { id: analyzeToast });
+      showAIErrorToast({ title: 'Email re-analysis failed.', error, id: analyzeToast });
     } finally {
       setIsAnalyzing(false);
     }
@@ -1784,7 +1840,7 @@ INSTRUCTIONS:
       setSelectedTender({ id: docRef.id, ...tenderData });
     } catch (error) {
       console.error('Tender analysis failed:', error);
-      toast.error('Failed to analyze tender', { id: analyzeToast });
+      showAIErrorToast({ title: 'Tender analysis failed.', error, id: analyzeToast });
     } finally {
       setIsAnalyzingTender(false);
     }
@@ -1826,7 +1882,7 @@ INSTRUCTIONS:
             combinedText += `\n--- Document: ${result.name} (OCR) ---\n${ocrText}\n`;
           } catch (ocrErr) {
             console.error(`OCR failed for ${result.name}:`, ocrErr);
-            toast.error(`Failed to perform OCR on ${result.name}`, { id: uploadToast });
+            showAIErrorToast({ title: `OCR failed for ${result.name}.`, error: ocrErr, id: uploadToast });
           }
         }
       }
@@ -1936,7 +1992,7 @@ INSTRUCTIONS:
       setShowEmailSelectorForMeeting(false);
     } catch (error) {
       console.error('Meeting conversion failed:', error);
-      toast.error('Processing error. Please check AI logs.', { id: convertToast });
+      showAIErrorToast({ title: 'Meeting conversion failed.', error, id: convertToast });
     }
   };
 
@@ -1954,7 +2010,7 @@ INSTRUCTIONS:
       toast.success('Bid draft generated!', { id: bidToast });
     } catch (error) {
       console.error('Bid generation failed:', error);
-      toast.error('Failed to generate bid draft', { id: bidToast });
+      showAIErrorToast({ title: 'Bid draft generation failed.', error, id: bidToast });
     } finally {
       setIsGeneratingBid(false);
     }
@@ -2003,7 +2059,7 @@ INSTRUCTIONS:
       toast.success('Reply draft generated!', { id: replyToast });
     } catch (error) {
       console.error('Reply generation failed:', error);
-      toast.error('Failed to generate reply draft', { id: replyToast });
+      showAIErrorToast({ title: 'Reply draft generation failed.', error, id: replyToast });
     } finally {
       setIsGeneratingReply(false);
     }
@@ -4555,12 +4611,16 @@ INSTRUCTIONS:
                                         onClick={async () => {
                                           const inst = prompt('How should I improve this section? (e.g. "Make it more professional", "Add more detail about our BIM services")');
                                           if (inst) {
-                                            toast.loading('Improving section...');
-                                            const improved = await improveProposalSection(section.content_html, inst);
-                                            const newSections = [...selectedProposal.sections];
-                                            newSections[idx].content_html = improved || section.content_html;
-                                            handleUpdateProposal(selectedProposal.id, { sections: newSections });
-                                            toast.dismiss();
+                                            const improveToast = toast.loading('Improving section...');
+                                            try {
+                                              const improved = await improveProposalSection(section.content_html, inst);
+                                              const newSections = [...selectedProposal.sections];
+                                              newSections[idx].content_html = improved || section.content_html;
+                                              handleUpdateProposal(selectedProposal.id, { sections: newSections });
+                                              toast.success('Section updated with AI.', { id: improveToast });
+                                            } catch (error) {
+                                              showAIErrorToast({ title: 'Section rewrite failed.', error, id: improveToast });
+                                            }
                                           }
                                         }}
                                         className="p-1 px-2 text-[10px] font-bold text-[#7F56D9] hover:bg-[#F9F5FF] rounded"
@@ -5334,11 +5394,15 @@ INSTRUCTIONS:
                                      try {
                                        const reader = new FileReader();
                                        reader.onload = async (event) => {
-                                         const base64 = event.target?.result as string;
-                                         const base64Content = base64.split(',')[1];
-                                         const extracted = await ocrDocument(base64Content, file.type, geminiConfig);
-                                         setMeetingNotesInput(extracted);
-                                         toast.success('Document read successfully!', { id: uploadToast });
+                                         try {
+                                           const base64 = event.target?.result as string;
+                                           const base64Content = base64.split(',')[1];
+                                           const extracted = await ocrDocument(base64Content, file.type, geminiConfig);
+                                           setMeetingNotesInput(extracted);
+                                           toast.success('Document read successfully!', { id: uploadToast });
+                                         } catch (error) {
+                                           showAIErrorToast({ title: 'Document OCR failed.', error, id: uploadToast });
+                                         }
                                        };
                                        reader.readAsDataURL(file);
                                      } catch (err) {
@@ -6640,7 +6704,7 @@ INSTRUCTIONS:
                         <div>
                           <p className="text-xs font-bold text-purple-800 mb-1">AI Provider Configuration</p>
                           <p className="text-[11px] text-purple-700 leading-relaxed">
-                            Configure which model family the app should use. This screen now supports both Gemini and Qwen-compatible API keys.
+                            Configure which model family the app should use. Gemini can use a saved key here, while Qwen reads its API key from backend environment variables only.
                           </p>
                         </div>
                       </div>
@@ -6685,11 +6749,18 @@ INSTRUCTIONS:
                             Gemini env: <span className="font-semibold text-[#101828]">{aiHealthStatus?.defaultProviderConfigured?.gemini ? 'Yes' : 'No'}</span>
                             {' '}• Qwen env: <span className="font-semibold text-[#101828]">{aiHealthStatus?.defaultProviderConfigured?.qwen ? 'Yes' : 'No'}</span>
                           </p>
+                          <p className="mt-2 text-[11px] text-[#667085] break-all">
+                            Qwen endpoint: <span className="font-semibold text-[#101828]">{aiHealthStatus?.qwenBaseUrl || 'Unknown'}</span>
+                          </p>
                         </div>
                         <div className="rounded-lg border border-[#EAECF0] bg-[#F9FAFB] p-3">
                           <p className="text-[10px] font-bold uppercase tracking-wide text-[#667085]">Saved API Key</p>
                           <p className="mt-1 text-sm font-bold text-[#101828]">
-                            {geminiConfig.apiKey ? 'Stored in Firestore config' : 'Using backend env only'}
+                            {geminiConfig.provider === 'qwen'
+                              ? 'Qwen uses backend env only'
+                              : geminiConfig.apiKey
+                                ? 'Stored in Firestore config'
+                                : 'Using backend env only'}
                           </p>
                         </div>
                       </div>
@@ -6717,7 +6788,7 @@ INSTRUCTIONS:
                         <div className="grid grid-cols-1 gap-3">
                           {[
                             { id: 'gemini', name: 'Gemini', desc: 'Google Gemini API key and Gemini model family.' },
-                            { id: 'qwen', name: 'Qwen', desc: 'Alibaba Cloud DashScope compatible API for Qwen models.' }
+                            { id: 'qwen', name: 'Qwen', desc: 'Alibaba Cloud DashScope compatible API for Qwen models. API key is managed in backend env.' }
                           ].map((provider) => (
                             <button
                               key={provider.id}
@@ -6726,7 +6797,8 @@ INSTRUCTIONS:
                                 setGeminiConfig({
                                   ...geminiConfig,
                                   provider: nextProvider,
-                                  model: AI_MODELS_BY_PROVIDER[nextProvider][0].id
+                                  model: getDefaultAIModel(nextProvider),
+                                  apiKey: nextProvider === 'qwen' ? '' : geminiConfig.apiKey
                                 });
                               }}
                               className={`p-4 rounded-xl border-2 text-left transition-all ${
@@ -6768,19 +6840,28 @@ INSTRUCTIONS:
                         </div>
                       </div>
 
-                      <div className="space-y-1.5">
-                        <label className="text-sm font-semibold text-[#344054]">API Key</label>
-                        <input
-                          type="password"
-                          value={geminiConfig.apiKey || ''}
-                          onChange={(e) => setGeminiConfig({ ...geminiConfig, apiKey: e.target.value })}
-                          className="w-full px-3 py-2 bg-white border border-[#D0D5DD] rounded-lg text-sm"
-                          placeholder={geminiConfig.provider === 'qwen' ? 'Enter Qwen / DashScope API key' : 'Enter Gemini API key'}
-                        />
-                        <p className="text-[11px] text-[#667085]">
-                          Leave this empty if you want to keep using backend environment variables. If you fill it here, it will be saved to Firestore config for admin-controlled runtime use.
-                        </p>
-                      </div>
+                      {geminiConfig.provider === 'gemini' ? (
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-semibold text-[#344054]">API Key</label>
+                          <input
+                            type="password"
+                            value={geminiConfig.apiKey || ''}
+                            onChange={(e) => setGeminiConfig({ ...geminiConfig, apiKey: e.target.value })}
+                            className="w-full px-3 py-2 bg-white border border-[#D0D5DD] rounded-lg text-sm"
+                            placeholder="Enter Gemini API key"
+                          />
+                          <p className="text-[11px] text-[#667085]">
+                            Leave this empty if you want to keep using backend environment variables. If you fill it here, it will be saved to Firestore config for admin-controlled runtime use.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="rounded-xl border border-[#D0D5DD] bg-[#F9FAFB] p-4">
+                          <p className="text-sm font-semibold text-[#344054]">Qwen API Key</p>
+                          <p className="mt-1 text-[11px] text-[#667085] leading-relaxed">
+                            Qwen API access is managed from backend environment variables only. Set <span className="font-semibold text-[#344054]">QWEN_API_KEY</span> or <span className="font-semibold text-[#344054]">DASHSCOPE_API_KEY</span> on the server, then choose the model here.
+                          </p>
+                        </div>
+                      )}
 
                       <label className="flex items-center gap-3 p-3 bg-[#F9FAFB] border border-[#D0D5DD] rounded-xl cursor-pointer hover:bg-[#F2F4F7] transition-all">
                         <input
