@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import { existsSync } from 'fs';
 import cors from 'cors';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
@@ -511,10 +512,16 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    const shouldServeFrontend = process.env.SERVE_FRONTEND !== 'false' && existsSync(path.join(distPath, 'index.html'));
+
+    if (shouldServeFrontend) {
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    } else {
+      console.log('[SERVER] Frontend static serving disabled or dist/index.html not found. Running API-only mode.');
+    }
   }
 
   app.listen(PORT, '0.0.0.0', () => {
